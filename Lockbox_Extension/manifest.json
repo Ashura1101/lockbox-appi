@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "LOCKBOX",
+  "version": "1.0",
+  "description": "Extensión de Chrome para el Gestor de Contraseñas LOCKBOX",
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "clipboardWrite",
+    "storage",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8000/*",
+    "<all_urls>"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  }
+}
