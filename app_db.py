@@ -103,6 +103,11 @@ class Usuario(Base):
         LargeBinary,
         nullable=False
     )
+    # Almacena el hash de la clave de recuperación
+    recovery_key_hash: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True
+    )
 
     # Relación uno-a-muchos con las credenciales del usuario
     credenciales: Mapped[list["Credencial"]] = relationship(
@@ -248,6 +253,15 @@ def init_db() -> bool:
         Base.metadata.create_all(bind=engine)
         logger.info("Tablas inicializadas correctamente o ya existentes.")
         
+        # Asegurar que la columna recovery_key_hash exista (en caso de que la tabla ya exista de antes)
+        from sqlalchemy import text
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS recovery_key_hash VARCHAR(255);"))
+            logger.info("Columna 'recovery_key_hash' verificada/creada con éxito.")
+        except Exception as e:
+            logger.warning(f"No se pudo asegurar la columna 'recovery_key_hash' mediante ALTER TABLE (puede no ser compatible o ya existir): {e}")
+
         # Poblar categorías por defecto
         with SessionLocal() as session:
             try:
@@ -262,6 +276,40 @@ def init_db() -> bool:
     except SQLAlchemyError as e:
         logger.error(f"Error crítico al crear las tablas en la base de datos: {e}")
         return False
+
+
+def restablecer_password(username: str, clave_recuperacion: str, nueva_password_maestra: str):
+    """
+    Restablece la contraseña maestra de un usuario utilizando su clave de recuperación.
+    """
+    from seguridad import generar_hash_maestro, generar_salt_derivacion, verificar_hash_maestro
+    
+    try:
+        with get_db_session() as session:
+            # 1. Buscar al usuario
+            usuario = session.query(Usuario).filter(Usuario.username == username).first()
+            if not usuario:
+                return False, "El usuario no existe."
+
+            # 2. Verificar que la clave de recuperación sea correcta
+            if not usuario.recovery_key_hash:
+                return False, "El usuario no tiene una clave de recuperación configurada."
+                
+            if not verificar_hash_maestro(clave_recuperacion, usuario.recovery_key_hash):
+                return False, "La Clave de Recuperación es incorrecta."
+
+            # 3. Si es correcta, generar nuevo salt y hash para la NUEVA contraseña maestra
+            nuevo_salt = generar_salt_derivacion()
+            nuevo_hash = generar_hash_maestro(nueva_password_maestra)
+
+            usuario.master_hash = nuevo_hash
+            usuario.salt_derivacion = nuevo_salt
+            
+            return True, "Contraseña actualizada con éxito."
+
+    except Exception as e:
+        logger.error(f"Error al restablecer contraseña: {e}")
+        return False, f"Error en la base de datos: {str(e)}"
 
 
 if __name__ == "__main__":

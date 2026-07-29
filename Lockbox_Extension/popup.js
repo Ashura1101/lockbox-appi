@@ -1,203 +1,268 @@
-const API_URL = "http://127.0.0.1:5000/api";
-const DEFAULT_USER = "usuario_demo";
+const API_URL = "https://lockbox-appi.onrender.com/api";
 
-document.addEventListener("DOMContentLoaded", () => {
-    // Pestañas
-    const tabSearch = document.getElementById("tab-search");
-    const tabAdd = document.getElementById("tab-add");
-    const viewSearch = document.getElementById("view-search");
-    const viewAdd = document.getElementById("view-add");
+document.addEventListener("DOMContentLoaded", async () => {
+  // Elementos de la interfaz
+  const viewLogin = document.getElementById("view-login");
+  const viewMain = document.getElementById("view-main");
+  const formLogin = document.getElementById("form-login");
+  const btnLogout = document.getElementById("btn-logout");
+  const activeUserDisplay = document.getElementById("active-user-display");
+  const statusMessage = document.getElementById("status-message");
 
-    // Inputs Búsqueda
-    const masterPasswordInput = document.getElementById("master-password");
-    const toggleMasterVisibilityBtn = document.getElementById("toggle-master-visibility");
-    const searchSiteInput = document.getElementById("search-site");
-    const btnSearch = document.getElementById("btn-search");
-    const resultsContainer = document.getElementById("results-container");
-    const statusMessage = document.getElementById("status-message");
+  // Pestañas
+  const tabSearch = document.getElementById("tab-search");
+  const tabAdd = document.getElementById("tab-add");
+  const viewSearch = document.getElementById("view-search");
+  const viewAdd = document.getElementById("add-credential-form");
 
-    // Inputs Formulario Añadir
-    const addCredentialForm = document.getElementById("add-credential-form");
-    const addSiteInput = document.getElementById("add-site");
-    const addUserInput = document.getElementById("add-user");
-    const addPassInput = document.getElementById("add-pass");
+  // Inputs
+  const searchSiteInput = document.getElementById("search-site");
+  const btnSearch = document.getElementById("btn-search");
+  const resultsContainer = document.getElementById("results-container");
 
-    // Generador
-    const genLengthInput = document.getElementById("gen-length");
-    const lengthValLabel = document.getElementById("length-val");
-    const genPasswordInput = document.getElementById("gen-password");
-    const btnGenPassword = document.getElementById("btn-gen-password");
-    const btnCopyGenPassword = document.getElementById("btn-copy-gen-password");
-    const btnClearClipboard = document.getElementById("btn-clear-clipboard");
+  // Inputs Formulario Añadir
+  const addSiteInput = document.getElementById("add-site");
+  const addUserInput = document.getElementById("add-user");
+  const addPassInput = document.getElementById("add-pass");
 
-    // ==========================================
-    // 0. RECUPERAR SESIÓN ACTIVA (STORAGE.SESSION)
-    // ==========================================
-    if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.session) {
-        chrome.storage.session.get(["masterPasswordSession"], (result) => {
-            if (result.masterPasswordSession) {
-                masterPasswordInput.value = result.masterPasswordSession;
-            }
+  // Estado del Servidor (Nube o Local)
+  const apiStatusBadge = document.getElementById("api-status");
+  if (apiStatusBadge) {
+    if (API_URL.includes("onrender.com")) {
+      apiStatusBadge.textContent = "Nube";
+      apiStatusBadge.style.background = "rgba(16, 185, 129, 0.15)";
+      apiStatusBadge.style.color = "#34d399";
+      apiStatusBadge.style.borderColor = "rgba(16, 185, 129, 0.3)";
+    } else {
+      apiStatusBadge.textContent = "Local";
+      apiStatusBadge.style.background = "rgba(99, 102, 241, 0.15)";
+      apiStatusBadge.style.color = "#818cf8";
+      apiStatusBadge.style.borderColor = "rgba(99, 102, 241, 0.3)";
+    }
+  }
+
+  // AUTO-DETECCIÓN DE PESTAÑA ACTIVA
+  if (typeof chrome !== "undefined" && chrome.tabs) {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs[0] && tabs[0].url) {
+        try {
+          const urlObj = new URL(tabs[0].url);
+          let domain = urlObj.hostname.replace(/^www\./, "");
+          if (domain && !domain.includes("chrome://") && !domain.includes("newtab")) {
+            searchSiteInput.value = domain;
+            if (addSiteInput) addSiteInput.value = domain;
+          }
+        } catch (e) {
+          console.log("No se pudo obtener el dominio:", e);
+        }
+      }
+    });
+  }
+
+  // 1. Comprobar si ya hay una sesión activa guardada
+  chrome.storage.local.get(["currentUser", "masterPassword"], (data) => {
+    if (data.currentUser && data.masterPassword) {
+      showMainView(data.currentUser);
+    } else {
+      showLoginView();
+    }
+  });
+
+  // 2. Evento del Login (Valida contra la API antes de guardar)
+  formLogin.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const username = document.getElementById("login-username").value.trim();
+    const masterPassword = document.getElementById("login-password").value;
+
+    if (!username || !masterPassword) return;
+
+    showStatus("Iniciando sesión...", "info");
+
+    try {
+      const response = await fetch(`${API_URL}/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, master_password: masterPassword })
+      });
+
+      const resData = await response.json();
+
+      if (response.ok) {
+        showStatus("", "hidden");
+        chrome.storage.local.set({ currentUser: username, masterPassword: masterPassword }, () => {
+          showMainView(username);
         });
+      } else {
+        showStatus(resData.error || "Usuario o contraseña incorrectos", "error");
+      }
+    } catch (err) {
+      showStatus("Error al conectar con la API Python.", "error");
+    }
+  });
+
+  // 3. Evento de Cerrar Sesión
+  btnLogout.addEventListener("click", () => {
+    chrome.storage.local.remove(["currentUser", "masterPassword"], () => {
+      showLoginView();
+    });
+  });
+
+  // Cambiar entre pestañas
+  tabSearch.addEventListener("click", () => {
+    tabSearch.classList.add("active");
+    tabAdd.classList.remove("active");
+    viewSearch.classList.remove("hidden");
+    viewAdd.classList.add("hidden");
+  });
+
+  tabAdd.addEventListener("click", () => {
+    tabAdd.classList.add("active");
+    tabSearch.classList.remove("active");
+    viewAdd.classList.remove("hidden");
+    viewSearch.classList.add("hidden");
+  });
+
+  // 4. Buscar Credenciales usando el usuario activo
+  btnSearch.addEventListener("click", async () => {
+    const querySite = searchSiteInput.value.trim().toLowerCase();
+    
+    chrome.storage.local.get(["currentUser", "masterPassword"], async (data) => {
+      if (!data.currentUser) return showStatus("Por favor inicia sesión", "error");
+
+      showStatus("Consultando y descifrando...", "info");
+      resultsContainer.innerHTML = "";
+
+      try {
+        const res = await fetch(`${API_URL}/credentials`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: data.currentUser,
+            master_password: data.masterPassword
+          })
+        });
+
+        // Siempre leer el JSON primero (sea error o éxito)
+        const result = await res.json();
+
+        // 🚨 Rate limit superado — mostrar mensaje personalizado de Flask
+        if (res.status === 429) {
+          showStatus(result.error || "Has superado el límite de intentos. Espera un momento.", "error");
+          return;
+        }
+
+        if (res.ok) {
+          showStatus("", "hidden");
+          let credenciales = result.credenciales || [];
+          if (querySite) {
+            credenciales = credenciales.filter(c =>
+              c.sitio_web.toLowerCase().includes(querySite) ||
+              c.login_user.toLowerCase().includes(querySite)
+            );
+          }
+          renderResults(credenciales);
+        } else {
+          showStatus(result.error || "Error al obtener credenciales", "error");
+        }
+      } catch (err) {
+        showStatus("Error al conectar con la API Python.", "error");
+      }
+    });
+  });
+
+  // 5. Guardar nueva credencial
+  viewAdd.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    
+    chrome.storage.local.get(["currentUser", "masterPassword"], async (data) => {
+      if (!data.currentUser || !data.masterPassword) {
+        showStatus("Debes iniciar sesión primero.", "error");
+        return;
+      }
+
+      const sitioWeb = addSiteInput.value.trim();
+      const loginUser = addUserInput.value.trim();
+      const password = addPassInput.value.trim();
+
+      showStatus("Cifrando y guardando...", "info");
+
+      try {
+        const response = await fetch(`${API_URL}/credentials/add`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: data.currentUser,
+            master_password: data.masterPassword,
+            sitio_web: sitioWeb,
+            login_user: loginUser,
+            password: password
+          })
+        });
+
+        const resData = await response.json();
+
+        if (response.ok) {
+          showStatus(`¡'${sitioWeb}' cifrado y guardado con éxito!`, "success");
+          viewAdd.reset();
+        } else {
+          showStatus(resData.error || "Error al guardar", "error");
+        }
+      } catch (err) {
+        showStatus("Error de conexión con el servidor.", "error");
+      }
+    });
+  });
+
+  // Funciones Auxiliares
+  function showMainView(username) {
+    viewLogin.classList.add("hidden");
+    viewMain.classList.remove("hidden");
+    btnLogout.classList.remove("hidden");
+    activeUserDisplay.textContent = username;
+    btnSearch.click(); // Autoconsultar al iniciar sesión
+  }
+
+  function showLoginView() {
+    viewLogin.classList.remove("hidden");
+    viewMain.classList.add("hidden");
+    btnLogout.classList.add("hidden");
+    document.getElementById("login-password").value = "";
+    resultsContainer.innerHTML = "";
+  }
+
+  function showStatus(msg, type) {
+    if (type === "hidden") {
+      statusMessage.classList.add("hidden");
+      return;
+    }
+    statusMessage.textContent = msg;
+    statusMessage.className = `status-msg ${type}`;
+    statusMessage.classList.remove("hidden");
+
+    // Estilos dinámicos para mensajes de estado basados en el tipo
+    statusMessage.style.cssText = `
+      padding: 8px 12px; margin-top: 10px; border-radius: 6px; font-size: 12px; font-weight: 500; text-align: center;
+      background: ${type === "error" ? "rgba(239, 68, 68, 0.2)" : type === "success" ? "rgba(34, 197, 94, 0.2)" : "rgba(59, 130, 246, 0.2)"};
+      color: ${type === "error" ? "#fca5a5" : type === "success" ? "#86efac" : "#93c5fd"};
+      border: 1px solid ${type === "error" ? "rgba(239, 68, 68, 0.4)" : type === "success" ? "rgba(34, 197, 94, 0.4)" : "rgba(59, 130, 246, 0.4)"};
+    `;
+  }
+
+  function renderResults(lista) {
+    resultsContainer.innerHTML = "";
+    if (lista.length === 0) {
+      resultsContainer.innerHTML = `<div style="padding: 12px; text-align: center; color: #a0aec0; font-size: 13px;">No se encontraron credenciales.</div>`;
+      return;
     }
 
-    // ==========================================
-    // 0.1 AUTO-DETECCIÓN DE PESTAÑA ACTIVA
-    // ==========================================
-    if (typeof chrome !== "undefined" && chrome.tabs) {
-        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-            if (tabs[0] && tabs[0].url) {
-                try {
-                    const urlObj = new URL(tabs[0].url);
-                    let domain = urlObj.hostname.replace(/^www\./, "");
-
-                    if (domain && !domain.includes("chrome://") && !domain.includes("newtab")) {
-                        searchSiteInput.value = domain;
-                        if (addSiteInput) addSiteInput.value = domain;
-                    }
-                } catch (e) {
-                    console.log("No se pudo obtener el dominio:", e);
-                }
-            }
-        });
-    }
-
-    // ==========================================
-    // 1. MANEJO DE PESTAÑAS (TABS)
-    // ==========================================
-    tabSearch.addEventListener("click", () => {
-        tabSearch.classList.add("active");
-        tabAdd.classList.remove("active");
-        viewSearch.classList.remove("d-none");
-        viewAdd.classList.add("d-none");
-        ocultarMensaje();
-    });
-
-    tabAdd.addEventListener("click", () => {
-        tabAdd.classList.add("active");
-        tabSearch.classList.remove("active");
-        viewAdd.classList.remove("d-none");
-        viewSearch.classList.add("d-none");
-        ocultarMensaje();
-    });
-
-    toggleMasterVisibilityBtn.addEventListener("click", () => {
-        masterPasswordInput.type = masterPasswordInput.type === "password" ? "text" : "password";
-    });
-
-    // ==========================================
-    // 2. CONSULTAR CREDENCIALES
-    // ==========================================
-    btnSearch.addEventListener("click", async () => {
-        const masterPassword = masterPasswordInput.value.trim();
-        const querySite = searchSiteInput.value.trim().toLowerCase();
-
-        if (!masterPassword) {
-            mostrarMensaje("Introduce tu contraseña maestra.", "error");
-            return;
-        }
-
-        mostrarMensaje("Consultando y descifrando...", "info");
-
-        try {
-            const response = await fetch(`${API_URL}/credentials`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ username: DEFAULT_USER, master_password: masterPassword })
-            });
-
-            const data = await response.json();
-
-            if (response.ok) {
-                // Guardar contraseña en la sesión del navegador
-                if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.session) {
-                    chrome.storage.session.set({ masterPasswordSession: masterPassword });
-                }
-
-                ocultarMensaje();
-                let credenciales = data.credenciales || [];
-                if (querySite) {
-                    credenciales = credenciales.filter(c =>
-                        c.sitio_web.toLowerCase().includes(querySite) ||
-                        c.login_user.toLowerCase().includes(querySite)
-                    );
-                }
-                renderizarResultados(credenciales);
-            } else {
-                mostrarMensaje(data.error || "Contraseña maestra incorrecta", "error");
-            }
-        } catch (err) {
-            mostrarMensaje("Error al conectar con la API Python.", "error");
-        }
-    });
-
-    // ==========================================
-    // 3. GUARDAR NUEVA CREDENCIAL
-    // ==========================================
-    addCredentialForm.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        const masterPassword = masterPasswordInput.value.trim();
-
-        if (!masterPassword) {
-            mostrarMensaje("Debes ingresar la Contraseña Maestra arriba antes de guardar.", "error");
-            return;
-        }
-
-        const sitioWeb = addSiteInput.value.trim();
-        const loginUser = addUserInput.value.trim();
-        const password = addPassInput.value.trim();
-
-        mostrarMensaje("Cifrando y guardando en Supabase...", "info");
-
-        try {
-            const response = await fetch(`${API_URL}/credentials/add`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    username: DEFAULT_USER,
-                    master_password: masterPassword,
-                    sitio_web: sitioWeb,
-                    login_user: loginUser,
-                    password: password
-                })
-            });
-
-            const data = await response.json();
-
-            if (response.ok) {
-                // Guardar contraseña en la sesión del navegador
-                if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.session) {
-                    chrome.storage.session.set({ masterPasswordSession: masterPassword });
-                }
-
-                mostrarMensaje(`¡'${sitioWeb}' cifrado y guardado con éxito!`, "success");
-                addCredentialForm.reset();
-            } else {
-                mostrarMensaje(data.error || "Error al guardar", "error");
-            }
-        } catch (err) {
-            mostrarMensaje("Error de conexión con el servidor.", "error");
-        }
-    });
-
-    // ==========================================
-    // 4. RENDERIZADO Y AUTO-LLENADO
-    // ==========================================
-    function renderizarResultados(lista) {
-        resultsContainer.innerHTML = "";
-        if (lista.length === 0) {
-            resultsContainer.innerHTML = `<div style="padding: 12px; text-align: center; color: #a0aec0; font-size: 13px;">No se encontraron credenciales.</div>`;
-            return;
-        }
-
-        lista.forEach(c => {
-            const card = document.createElement("div");
-            card.style.cssText = `
+    lista.forEach(c => {
+      const card = document.createElement("div");
+      card.style.cssText = `
         background: rgba(255, 255, 255, 0.05);
         border: 1px solid rgba(255, 255, 255, 0.1);
         border-radius: 8px; padding: 12px; margin-top: 10px;
       `;
-            card.innerHTML = `
+      card.innerHTML = `
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
           <div style="font-weight: 700; color: #6366f1; font-size: 14px;">🌐 ${escapeHTML(c.sitio_web)}</div>
           <div>
@@ -215,160 +280,122 @@ document.addEventListener("DOMContentLoaded", () => {
         </button>
       `;
 
-            // Evento: Copiar
-            card.querySelector(".btn-copy-item").addEventListener("click", () => {
-                navigator.clipboard.writeText(c.password);
-                mostrarMensaje("¡Contraseña copiada!", "success");
-                setTimeout(ocultarMensaje, 2000);
+      // Evento: Copiar
+      card.querySelector(".btn-copy-item").addEventListener("click", () => {
+        navigator.clipboard.writeText(c.password);
+        showStatus("¡Contraseña copiada!", "success");
+        setTimeout(() => showStatus("", "hidden"), 2000);
+      });
+
+      // Evento: Auto-llenar
+      card.querySelector(".btn-autofill").addEventListener("click", () => {
+        autofillCredentials(c.login_user, c.password);
+        showStatus("¡Credenciales inyectadas!", "success");
+        setTimeout(() => showStatus("", "hidden"), 2000);
+      });
+
+      // Evento: Eliminar
+      card.querySelector(".btn-delete-item").addEventListener("click", async () => {
+        chrome.storage.local.get(["currentUser", "masterPassword"], async (data) => {
+          if (!data.currentUser || !data.masterPassword) return;
+          if (!confirm(`¿Estás seguro de borrar las credenciales de '${c.sitio_web}'?`)) return;
+
+          try {
+            const res = await fetch(`${API_URL}/credentials/delete`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                id: c.id,
+                username: data.currentUser,
+                master_password: data.masterPassword
+              })
             });
 
-            // Evento: Auto-llenar
-            card.querySelector(".btn-autofill").addEventListener("click", () => {
-                autofillCredentials(c.login_user, c.password);
-                mostrarMensaje("¡Credenciales inyectadas!", "success");
-                setTimeout(ocultarMensaje, 2000);
-            });
-
-            // Evento: Eliminar
-            card.querySelector(".btn-delete-item").addEventListener("click", async () => {
-                const masterPassword = masterPasswordInput.value.trim();
-                if (!confirm(`¿Estás seguro de borrar las credenciales de '${c.sitio_web}'?`)) return;
-
-                try {
-                    const res = await fetch(`${API_URL}/credentials/delete`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            id: c.id,
-                            username: DEFAULT_USER,
-                            master_password: masterPassword
-                        })
-                    });
-
-                    if (res.ok) {
-                        mostrarMensaje("Credencial eliminada correctamente", "success");
-                        btnSearch.click(); // Recargar la lista
-                    } else {
-                        const data = await res.json();
-                        mostrarMensaje(data.error || "Error al eliminar", "error");
-                    }
-                } catch (e) {
-                    mostrarMensaje("Error de conexión al eliminar", "error");
-                }
-            });
-
-            // Evento: Editar
-            card.querySelector(".btn-edit-item").addEventListener("click", async () => {
-                const nuevoUsuario = prompt("Editar usuario/email:", c.login_user);
-                if (nuevoUsuario === null) return;
-
-                const nuevaPassword = prompt("Editar contraseña (déjalo igual si no quieres cambiarla):", c.password);
-                if (nuevaPassword === null) return;
-
-                const masterPassword = masterPasswordInput.value.trim();
-
-                try {
-                    const res = await fetch(`${API_URL}/credentials/update`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            id: c.id,
-                            username: DEFAULT_USER,
-                            master_password: masterPassword,
-                            sitio_web: c.sitio_web,
-                            login_user: nuevoUsuario,
-                            password: nuevaPassword
-                        })
-                    });
-
-                    if (res.ok) {
-                        mostrarMensaje("Credencial actualizada con éxito", "success");
-                        btnSearch.click(); // Recargar la lista
-                    } else {
-                        const data = await res.json();
-                        mostrarMensaje(data.error || "Error al actualizar", "error");
-                    }
-                } catch (e) {
-                    mostrarMensaje("Error de conexión al actualizar", "error");
-                }
-            });
-
-            resultsContainer.appendChild(card);
+            if (res.ok) {
+              showStatus("Credencial eliminada correctamente", "success");
+              btnSearch.click(); // Recargar la lista
+            } else {
+              const resData = await res.json();
+              showStatus(resData.error || "Error al eliminar", "error");
+            }
+          } catch (e) {
+            showStatus("Error de conexión al eliminar", "error");
+          }
         });
-    }
+      });
 
-    // ==========================================
-    // 5. GENERADOR Y AUXILIARES
-    // ==========================================
-    genLengthInput.addEventListener("input", (e) => {
-        lengthValLabel.textContent = `Longitud: ${e.target.value} caracteres`;
+      // Evento: Editar
+      card.querySelector(".btn-edit-item").addEventListener("click", async () => {
+        const nuevoUsuario = prompt("Editar usuario/email:", c.login_user);
+        if (nuevoUsuario === null) return;
+
+        const nuevaPassword = prompt("Editar contraseña (déjalo igual si no quieres cambiarla):", c.password);
+        if (nuevaPassword === null) return;
+
+        chrome.storage.local.get(["currentUser", "masterPassword"], async (data) => {
+          if (!data.currentUser || !data.masterPassword) return;
+
+          try {
+            const res = await fetch(`${API_URL}/credentials/update`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                id: c.id,
+                username: data.currentUser,
+                master_password: data.masterPassword,
+                sitio_web: c.sitio_web,
+                login_user: nuevoUsuario,
+                password: nuevaPassword
+              })
+            });
+
+            if (res.ok) {
+              showStatus("Credencial actualizada con éxito", "success");
+              btnSearch.click(); // Recargar la lista
+            } else {
+              const resData = await res.json();
+              showStatus(resData.error || "Error al actualizar", "error");
+            }
+          } catch (e) {
+            showStatus("Error de conexión al actualizar", "error");
+          }
+        });
+      });
+
+      resultsContainer.appendChild(card);
     });
+  }
 
-    btnGenPassword.addEventListener("click", () => {
-        const length = parseInt(genLengthInput.value);
-        const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()_+-=[]{}|;:,.<>?";
-        let password = "";
-        const array = new Uint32Array(length);
-        window.crypto.getRandomValues(array);
-        for (let i = 0; i < length; i++) password += chars[array[i] % chars.length];
-        genPasswordInput.value = password;
-    });
-
-    btnCopyGenPassword.addEventListener("click", () => {
-        if (!genPasswordInput.value) return;
-        navigator.clipboard.writeText(genPasswordInput.value);
-        mostrarMensaje("¡Contraseña generada copiada!", "success");
-        setTimeout(ocultarMensaje, 2000);
-    });
-
-    btnClearClipboard.addEventListener("click", () => {
-        navigator.clipboard.writeText("");
-        mostrarMensaje("Portapapeles limpiado.", "info");
-        setTimeout(ocultarMensaje, 2000);
-    });
-
-    function mostrarMensaje(texto, tipo) {
-        statusMessage.textContent = texto;
-        statusMessage.classList.remove("d-none");
-        statusMessage.style.cssText = `
-      padding: 8px 12px; margin-top: 10px; border-radius: 6px; font-size: 12px; font-weight: 500; text-align: center;
-      background: ${tipo === "error" ? "rgba(239, 68, 68, 0.2)" : tipo === "success" ? "rgba(34, 197, 94, 0.2)" : "rgba(59, 130, 246, 0.2)"};
-      color: ${tipo === "error" ? "#fca5a5" : tipo === "success" ? "#86efac" : "#93c5fd"};
-      border: 1px solid ${tipo === "error" ? "rgba(239, 68, 68, 0.4)" : tipo === "success" ? "rgba(34, 197, 94, 0.4)" : "rgba(59, 130, 246, 0.4)"};
-    `;
-    }
-
-    function ocultarMensaje() { statusMessage.classList.add("d-none"); }
-    function escapeHTML(str) { return str.replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag)); }
+  function escapeHTML(str) { return str.replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag)); }
 });
 
 // ==========================================
 // FUNCIÓN INYECTORA (Scripting)
 // ==========================================
 async function autofillCredentials(user, password) {
-    if (typeof chrome === "undefined" || !chrome.tabs) return;
+  if (typeof chrome === "undefined" || !chrome.tabs) return;
 
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab || !tab.id) return;
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab || !tab.id) return;
 
-    chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: (userInput, passwordInput) => {
-            const passField = document.querySelector('input[type="password"]');
-            const userField = document.querySelector('input[type="text"], input[type="email"], input[name*="user"], input[name*="email"], input[name*="login"]');
+  chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: (userInput, passwordInput) => {
+      const passField = document.querySelector('input[type="password"]');
+      const userField = document.querySelector('input[type="text"], input[type="email"], input[name*="user"], input[name*="email"], input[name*="login"]');
 
-            if (userField && userInput) {
-                userField.value = userInput;
-                userField.dispatchEvent(new Event('input', { bubbles: true }));
-                userField.dispatchEvent(new Event('change', { bubbles: true }));
-            }
+      if (userField && userInput) {
+        userField.value = userInput;
+        userField.dispatchEvent(new Event('input', { bubbles: true }));
+        userField.dispatchEvent(new Event('change', { bubbles: true }));
+      }
 
-            if (passField && passwordInput) {
-                passField.value = passwordInput;
-                passField.dispatchEvent(new Event('input', { bubbles: true }));
-                passField.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-        },
-        args: [user, password]
-    });
+      if (passField && passwordInput) {
+        passField.value = passwordInput;
+        passField.dispatchEvent(new Event('input', { bubbles: true }));
+        passField.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    },
+    args: [user, password]
+  });
 }

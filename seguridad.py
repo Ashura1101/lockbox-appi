@@ -163,3 +163,15 @@ def generar_contrasena_segura(longitud: int = 16) -> str:
 
     return "".join(password_mezclada)
 
+
+def generar_clave_recuperacion() -> str:
+    """
+    Genera una clave de recuperación aleatoria fácil de anotar.
+    Ejemplo: LOCK-A1B2-C3D4
+    """
+    import secrets
+    bloque1 = secrets.token_hex(2).upper()
+    bloque2 = secrets.token_hex(2).upper()
+    return f"LOCK-{bloque1}-{bloque2}"
+
+

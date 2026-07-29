@@ -7,7 +7,7 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("lockbox_theme.json")
 
 # Importaciones del backend
-from app_db import Usuario, Credencial, Categoria, get_db_session, init_db
+from app_db import Usuario, Credencial, Categoria, get_db_session, init_db, restablecer_password
 from seguridad import (
     generar_hash_maestro,
     verificar_hash_maestro,
@@ -15,7 +15,8 @@ from seguridad import (
     derivar_clave_fernet,
     cifrar_contrasena,
     descifrar_contrasena,
-    generar_contrasena_segura
+    generar_contrasena_segura,
+    generar_clave_recuperacion
 )
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import or_
@@ -1221,6 +1222,19 @@ class App(ctk.CTk):
         self.login_button = ctk.CTkButton(container, text="Ingresar", width=280, command=self.handle_login)
         self.login_button.pack(pady=20)
 
+        # Texto interactivo debajo del botón
+        link_olvido = ctk.CTkLabel(
+            master=container,
+            text="¿Olvidaste tu usuario o contraseña?",
+            text_color="#8b9eb3",
+            cursor="hand2",
+            font=("Arial", 11, "underline")
+        )
+        link_olvido.pack(pady=(12, 0))
+
+        # Vincular clic para abrir la ventana de recuperación
+        link_olvido.bind("<Button-1>", lambda e: self.abrir_ventana_recuperacion())
+
     def setup_register_tab(self):
         tab = self.tabview.tab("Registrarse")
         container = ctk.CTkFrame(tab, fg_color="transparent")
@@ -1241,6 +1255,79 @@ class App(ctk.CTk):
             command=self.handle_register
         )
         self.register_button.pack(pady=20)
+
+    def abrir_ventana_recuperacion(self):
+        # Ventana emergente (TopLevel)
+        win_recovery = ctk.CTkToplevel(self)
+        win_recovery.title("Recuperar Cuenta - Lockbox")
+        win_recovery.geometry("420x450")
+        win_recovery.resizable(False, False)
+        
+        # Mantener la ventana al frente
+        win_recovery.transient(self)
+        win_recovery.grab_set()
+        win_recovery.focus_force()
+
+        # Centrar la ventana secundaria con respecto a la principal
+        win_recovery.update_idletasks()
+        parent_x = self.winfo_rootx()
+        parent_y = self.winfo_rooty()
+        parent_w = self.winfo_width()
+        parent_h = self.winfo_height()
+        
+        w = 420
+        h = 450
+        
+        x = parent_x + (parent_w - w) // 2
+        y = parent_y + (parent_h - h) // 2
+        win_recovery.geometry(f"{w}x{h}+{x}+{y}")
+
+        title = ctk.CTkLabel(win_recovery, text="Restablecer Contraseña", font=("Arial", 18, "bold"))
+        title.pack(pady=(20, 10))
+
+        # Mensaje de Advertencia
+        warning_box = ctk.CTkTextbox(win_recovery, width=360, height=80, activate_scrollbars=False)
+        warning_box.insert("1.0", "⚠️ IMPORTANTE:\nPara restablecer tu acceso necesitas la Clave de Recuperación que se te proporcionó al registrarte. Lockbox no guarda tu contraseña maestra.")
+        warning_box.configure(state="disabled", text_color="#ffcc00", fg_color="#2b2b2b")
+        warning_box.pack(pady=5)
+
+        # Entradas de texto
+        user_entry = ctk.CTkEntry(win_recovery, placeholder_text="Nombre de usuario", width=340)
+        user_entry.pack(pady=8)
+
+        key_entry = ctk.CTkEntry(win_recovery, placeholder_text="Clave de Recuperación (ej: LOCK-XXXX)", width=340)
+        key_entry.pack(pady=8)
+
+        new_pass_entry = ctk.CTkEntry(win_recovery, placeholder_text="Nueva Contraseña Maestra", show="•", width=340)
+        new_pass_entry.pack(pady=8)
+
+        def ejecutar_recuperacion():
+            usuario = user_entry.get().strip()
+            clave_rec = key_entry.get().strip()
+            nueva_pass = new_pass_entry.get()
+
+            if not usuario or not clave_rec or not nueva_pass:
+                messagebox.showerror("Error", "Por favor completa todos los campos.", parent=win_recovery)
+                return
+
+            # 🔗 Llamada al backend
+            exito, mensaje = restablecer_password(usuario, clave_rec, nueva_pass)
+            
+            if exito:
+                messagebox.showinfo("¡Éxito!", mensaje, parent=win_recovery)
+                win_recovery.destroy()
+            else:
+                messagebox.showerror("Error de Autenticación", mensaje, parent=win_recovery)
+
+        btn_restablecer = ctk.CTkButton(
+            win_recovery, 
+            text="Restablecer Contraseña", 
+            fg_color="#3b82f6", 
+            hover_color="#2563eb",
+            command=ejecutar_recuperacion,
+            width=340
+        )
+        btn_restablecer.pack(pady=20)
 
     def destroy_login_ui(self):
         """Destruye y limpia todos los widgets del formulario de login."""
@@ -1301,6 +1388,9 @@ class App(ctk.CTk):
         self.show_status("Registrando usuario...")
 
         try:
+            # Generar clave de recuperación para el usuario
+            clave_raw = generar_clave_recuperacion()
+
             with get_db_session() as session:
                 usuario_existente = session.query(Usuario).filter_by(username=username).first()
                 if usuario_existente:
@@ -1309,16 +1399,26 @@ class App(ctk.CTk):
 
                 hash_maestro = generar_hash_maestro(password)
                 salt_derivacion = generar_salt_derivacion()
+                hash_recuperacion = generar_hash_maestro(clave_raw)
 
                 nuevo_usuario = Usuario(
                     username=username,
                     master_hash=hash_maestro,
-                    salt_derivacion=salt_derivacion
+                    salt_derivacion=salt_derivacion,
+                    recovery_key_hash=hash_recuperacion
                 )
                 session.add(nuevo_usuario)
                 
             self.show_status("¡Usuario registrado con éxito! Ya puedes iniciar sesión.", is_error=False)
             logger.info(f"Usuario '{username}' registrado correctamente.")
+
+            # Mostrar la clave de recuperación al usuario
+            msg = (
+                f"Tu Clave de Recuperación es:\n\n{clave_raw}\n\n"
+                "⚠️ IMPORTANTE:\nAnótala en un papel o lugar seguro. No la podrás volver a ver.\n"
+                "La necesitarás para restablecer tu contraseña maestra si la olvidas."
+            )
+            messagebox.showinfo("Clave de Recuperación - Lockbox", msg, parent=self)
             
             self.register_user_entry.delete(0, tk.END)
             self.register_pass_entry.delete(0, tk.END)

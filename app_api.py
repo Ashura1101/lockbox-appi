@@ -1,6 +1,11 @@
 import logging
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+# Rate limiting para proteger rutas críticas contra fuerza bruta
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+# Middleware para leer la IP real del usuario detrás de un proxy (Render, Nginx, etc.)
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from app_db import (
     get_db_session,
@@ -15,17 +20,33 @@ from seguridad import (
     cifrar_contrasena,
     descifrar_contrasena,
     generar_hash_maestro,
-    generar_salt_derivacion
+    generar_salt_derivacion,
+    generar_clave_recuperacion
 )
 
 # Inicialización de la aplicación Flask
 app = Flask(__name__)
+
+# Configurar Flask para leer la IP real del usuario detrás de Render u otro reverse proxy.
+# Sin esto, flask-limiter ve siempre la IP interna del proxy y el rate limit no funciona bien.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
 # Habilitar CORS para permitir que la extensión de Chrome haga peticiones al backend
 CORS(app)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app_api")
+
+# ==========================================
+# RATE LIMITER — Protección contra fuerza bruta
+# ==========================================
+# get_remote_address identifica al solicitante por su IP
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["200 per day", "50 per hour"],  # Límite global para rutas sin decorador propio
+    storage_uri="memory://"  # Contadores almacenados en RAM del servidor
+)
 
 # Asegurar que las tablas estén inicializadas al arrancar la API
 init_db()
@@ -38,6 +59,7 @@ def ping():
 
 
 @app.route("/api/register", methods=["POST"])
+@limiter.limit("3 per minute")  # Máximo 3 registros por minuto desde la misma IP
 def register():
     """
     Registra un nuevo usuario.
@@ -59,18 +81,25 @@ def register():
         # Crear nuevo usuario con sus sales y hash maestro
         hash_maestro = generar_hash_maestro(master_password)
         salt_derivacion = generar_salt_derivacion()
+        clave_raw = generar_clave_recuperacion()
+        hash_recuperacion = generar_hash_maestro(clave_raw)
 
         nuevo_usuario = Usuario(
             username=username,
             master_hash=hash_maestro,
-            salt_derivacion=salt_derivacion
+            salt_derivacion=salt_derivacion,
+            recovery_key_hash=hash_recuperacion
         )
         session.add(nuevo_usuario)
 
-    return jsonify({"message": f"Usuario '{username}' registrado con éxito"}), 201
+    return jsonify({
+        "message": f"Usuario '{username}' registrado con éxito",
+        "recovery_key": clave_raw
+    }), 201
 
 
 @app.route("/api/login", methods=["POST"])
+@limiter.limit("5 per minute")  # Bloquea intentos de adivinar la contraseña maestra
 def login():
     """
     Autentica al usuario con su contraseña maestra.
@@ -99,6 +128,7 @@ def login():
 
 
 @app.route("/api/credentials", methods=["POST"])
+@limiter.limit("2 per minute")  # 🧪 TEMPORAL PARA PRUEBAS — Restaurar a "30 per minute" después
 def get_credentials():
     """
     Obtiene y descifra todas las contraseñas del usuario.
@@ -134,6 +164,7 @@ def get_credentials():
 
 
 @app.route("/api/credentials/add", methods=["POST"])
+@limiter.limit("10 per minute")  # Evita la inserción masiva automatizada de credenciales
 def add_credential():
     """
     Guarda una nueva contraseña encriptada en la base de datos.
@@ -178,6 +209,7 @@ def add_credential():
 # ELIMINAR CREDENCIAL
 # ==========================================
 @app.route('/api/credentials/delete', methods=['POST'])
+@limiter.limit("10 per minute")  # Previene eliminación masiva de credenciales
 def delete_credential():
     try:
         import uuid
@@ -216,6 +248,7 @@ def delete_credential():
 # EDITAR CREDENCIAL
 # ==========================================
 @app.route('/api/credentials/update', methods=['POST'])
+@limiter.limit("10 per minute")  # Previene modificaciones masivas automatizadas
 def update_credential():
     try:
         import uuid
@@ -276,6 +309,17 @@ def get_categories():
     except Exception as e:
         logger.error(f"Error al obtener categorías: {str(e)}")
         return jsonify({'error': 'Error interno'}), 500
+
+
+# ==========================================
+# MANEJADOR DE ERROR 429 — Rate Limit Superado
+# ==========================================
+@app.errorhandler(429)
+def ratelimit_handler(e):
+    """Responde de forma limpia cuando un cliente supera el límite de peticiones."""
+    return jsonify({
+        "error": "Has superado el límite de intentos. Por favor, espera un momento y vuelve a intentarlo."
+    }), 429
 
 
 if __name__ == "__main__":
