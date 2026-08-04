@@ -45,7 +45,8 @@ limiter = Limiter(
     get_remote_address,
     app=app,
     default_limits=["200 per day", "50 per hour"],  # Límite global para rutas sin decorador propio
-    storage_uri="memory://"  # Contadores almacenados en RAM del servidor
+    storage_uri="memory://",  # Contadores almacenados en RAM del servidor
+    strategy="fixed-window"   # Ventana fija: cuenta TODAS las peticiones (incluyendo errores 401/400)
 )
 
 # Asegurar que las tablas estén inicializadas al arrancar la API
@@ -128,7 +129,7 @@ def login():
 
 
 @app.route("/api/credentials", methods=["POST"])
-@limiter.limit("2 per minute")  # 🧪 TEMPORAL PARA PRUEBAS — Restaurar a "30 per minute" después
+@limiter.limit("30 per minute", per_method=True)  # 🧪 TEMPORAL — Restaurar a "30 per minute" después
 def get_credentials():
     """
     Obtiene y descifra todas las contraseñas del usuario.
