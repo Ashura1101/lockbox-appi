@@ -3,23 +3,15 @@ import tkinter as tk
 from tkinter import messagebox
 import customtkinter as ctk
 from typing import Callable
+import requests
+
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("lockbox_theme.json")
 
-# Importaciones del backend
-from app_db import Usuario, Credencial, Categoria, get_db_session, init_db, restablecer_password
-from seguridad import (
-    generar_hash_maestro,
-    verificar_hash_maestro,
-    generar_salt_derivacion,
-    derivar_clave_fernet,
-    cifrar_contrasena,
-    descifrar_contrasena,
-    generar_contrasena_segura,
-    generar_clave_recuperacion
-)
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import or_
+from seguridad import generar_contrasena_segura
+
+# URL de la API desplegada en Render
+API_BASE_URL = "https://lockbox-appi.onrender.com/api"
 
 # Configuración del logging
 logging.basicConfig(
@@ -28,34 +20,39 @@ logging.basicConfig(
 )
 logger = logging.getLogger("app_gui")
 
-# Configuración visual de CustomTkinter
-ctk.set_appearance_mode("dark")
-# Tema cargado globalmente desde lockbox_theme.json
 
+def obtener_categorias_api():
+    """Consulta la API en Render para obtener las categorías disponibles."""
+    try:
+        response = requests.get(f"{API_BASE_URL}/categories", timeout=10)
+        if response.status_code == 200:
+            return response.json().get("categories", [])
+        return []
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error al conectar con la API para categorías: {e}")
+        return []
 
 
 class AgregarCredencialWindow(ctk.CTkToplevel):
     """
-    Ventana emergente (modal) para agregar una nueva credencial a la base de datos.
+    Ventana emergente (modal) para agregar una nueva credencial vía la API.
     """
-    def __init__(self, parent: ctk.CTkFrame, usuario_id: str, clave_derivada: bytes, on_save_callback: Callable[[], None]):
+    def __init__(self, parent: ctk.CTkFrame, username: str, master_password: str, on_save_callback: Callable[[], None]):
         super().__init__(parent)
-        self.usuario_id = usuario_id
-        self.clave_derivada = clave_derivada
+        self.username = username
+        self.master_password = master_password
         self.on_save_callback = on_save_callback
 
         # Configuración de ventana
         self.title("Agregar Nueva Credencial")
-        self.geometry("440x590")  # Ligeramente más ancho y alto para dar aire a los elementos
+        self.geometry("440x590")
         self.resizable(False, False)
-        self.configure(fg_color="#0B0F19")  # Fondo unificado con la paleta "Cool Space"
+        self.configure(fg_color="#0B0F19")
 
-        # Comportamiento modal (hacer foco en esta ventana y bloquear la principal)
+        # Comportamiento modal
         self.transient(parent)
         self.grab_set()
         self.focus_force()
-
-        # Centrar la ventana secundaria con respecto a la principal
         self.center_toplevel(parent)
 
         # Encabezado
@@ -106,7 +103,7 @@ class AgregarCredencialWindow(ctk.CTkToplevel):
         self.btn_generar.pack(side="left")
 
         # Fila del Slider de longitud + etiqueta dinámica
-        self.longitud_pass = 16  # Valor inicial
+        self.longitud_pass = 16
 
         self.slider_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.slider_frame.pack(pady=(8, 4), padx=30, fill="x")
@@ -124,7 +121,7 @@ class AgregarCredencialWindow(ctk.CTkToplevel):
             self.slider_frame,
             from_=8,
             to=30,
-            number_of_steps=22,          # pasos enteros: 8, 9, 10, ... 30
+            number_of_steps=22,
             command=self._on_slider_move
         )
         self.slider_longitud.set(self.longitud_pass)
@@ -144,15 +141,14 @@ class AgregarCredencialWindow(ctk.CTkToplevel):
         )
         self.check_show_pass.pack(pady=(10, 14))
 
-        # Recuperar categorías disponibles de PostgreSQL para el menú desplegable
+        # Recuperar categorías disponibles desde la API
         self.categorias_map = {}
         categorias_valores = ["Sin Categoría"]
         try:
-            with get_db_session() as session:
-                cats = session.query(Categoria).order_by(Categoria.nombre).all()
-                for c in cats:
-                    self.categorias_map[c.nombre] = c.id
-                    categorias_valores.append(c.nombre)
+            cats = obtener_categorias_api()
+            for c in cats:
+                self.categorias_map[c["nombre"]] = c["id"]
+                categorias_valores.append(c["nombre"])
         except Exception as e:
             logger.error(f"Error al cargar categorías en el formulario: {e}")
 
@@ -174,7 +170,7 @@ class AgregarCredencialWindow(ctk.CTkToplevel):
         )
         self.label_error.pack(pady=(0, 4))
 
-        # Botón de guardar — color de acento índigo de la app
+        # Botón de guardar
         self.btn_guardar = ctk.CTkButton(
             self,
             text="Guardar Credencial",
@@ -194,38 +190,31 @@ class AgregarCredencialWindow(ctk.CTkToplevel):
         parent_y = parent.winfo_rooty()
         parent_w = parent.winfo_width()
         parent_h = parent.winfo_height()
-        
         w = self.winfo_width()
         h = self.winfo_height()
-        
         x = parent_x + (parent_w - w) // 2
         y = parent_y + (parent_h - h) // 2
         self.geometry(f"+{x}+{y}")
 
     def _on_slider_move(self, valor):
-        """Actualiza la etiqueta y el estado interno al mover el slider de longitud."""
         self.longitud_pass = int(valor)
         self.label_longitud.configure(text=f"Longitud: {self.longitud_pass} caracteres")
 
     def toggle_password_visibility(self):
-        """Muestra u oculta los caracteres del campo de contraseña."""
         if self.show_pass_var.get() == "on":
             self.entry_password.configure(show="")
         else:
             self.entry_password.configure(show="*")
 
     def generar_y_rellenar(self):
-        """Genera una contraseña segura usando la longitud del slider e inserta el resultado en el campo."""
         nueva_pass = generar_contrasena_segura(self.longitud_pass)
-        self.entry_password.configure(show="")   # revelar para que el usuario confirme
+        self.entry_password.configure(show="")
         self.entry_password.delete(0, tk.END)
         self.entry_password.insert(0, nueva_pass)
-        # Activar el checkbox "Mostrar" para que el usuario vea la contraseña generada
         self.show_pass_var.set("on")
         self.check_show_pass.select()
 
     def guardar_credencial(self):
-        """Valida y guarda la credencial cifrada en la base de datos asignando su categoría."""
         sitio = self.entry_sitio.get().strip()
         usuario = self.entry_usuario.get().strip()
         password = self.entry_password.get()
@@ -235,34 +224,31 @@ class AgregarCredencialWindow(ctk.CTkToplevel):
             return
 
         try:
-            # Obtener el ID de la categoría seleccionada (será un entero o None si es "Sin Categoría")
-            cat_seleccionada = self.option_categoria.get()
-            cat_id = self.categorias_map.get(cat_seleccionada)
+            response = requests.post(
+                f"{API_BASE_URL}/credentials/add",
+                json={
+                    "username": self.username,
+                    "master_password": self.master_password,
+                    "sitio_web": sitio,
+                    "login_user": usuario,
+                    "password": password
+                },
+                timeout=10
+            )
 
-            # Cifrar la contraseña usando la clave derivada del usuario
-            password_cifrada = cifrar_contrasena(password, self.clave_derivada)
+            if response.status_code == 201:
+                logger.info(f"Credencial para '{sitio}' guardada con éxito vía API.")
+                self.on_save_callback()
+                self.destroy()
+            elif response.status_code == 429:
+                self.label_error.configure(text="Has superado el límite de peticiones. Espera un momento.")
+            else:
+                data = response.json() if response.headers.get("content-type") == "application/json" else {}
+                self.label_error.configure(text=data.get("error", "Error al guardar la credencial."))
 
-            with get_db_session() as session:
-                nueva_cred = Credencial(
-                    usuario_id=self.usuario_id,
-                    categoria_id=cat_id,
-                    sitio_web=sitio,
-                    login_user=usuario,
-                    password_cifrada=password_cifrada
-                )
-                session.add(nueva_cred)
-            
-            logger.info(f"Credencial para '{sitio}' guardada con éxito.")
-            # Ejecutar el callback de recarga y destruir ventana
-            self.on_save_callback()
-            self.destroy()
-
-        except SQLAlchemyError as e:
-            logger.error(f"Error al guardar credencial en base de datos: {e}")
-            self.label_error.configure(text="Error de base de datos al guardar.")
-        except Exception as e:
-            logger.error(f"Error inesperado al cifrar/guardar: {e}")
-            self.label_error.configure(text="Ocurrió un error inesperado.")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error al conectar con la API al guardar credencial: {e}")
+            self.label_error.configure(text="Error de conexión con el servidor.")
 
 
 class GenerarContrasenaWindow(ctk.CTkToplevel):
@@ -273,23 +259,17 @@ class GenerarContrasenaWindow(ctk.CTkToplevel):
         super().__init__(parent)
         self.app_root = app_root
 
-        # Configuración de ventana
         self.title("Generador Seguro de Contraseñas")
         self.geometry("420x380")
         self.resizable(False, False)
 
-        # Comportamiento modal
         self.transient(parent)
         self.grab_set()
         self.focus_force()
-
-        # Centrar ventana
         self.center_toplevel(parent)
 
-        # Longitud por defecto
         self.longitud = 16
 
-        # Encabezado
         self.label_titulo = ctk.CTkLabel(
             self,
             text="Generador de Contraseñas",
@@ -297,7 +277,6 @@ class GenerarContrasenaWindow(ctk.CTkToplevel):
         )
         self.label_titulo.pack(pady=(20, 15))
 
-        # Campo de visualización de contraseña (solo lectura)
         self.entry_pass = ctk.CTkEntry(
             self,
             width=320,
@@ -307,7 +286,6 @@ class GenerarContrasenaWindow(ctk.CTkToplevel):
         )
         self.entry_pass.pack(pady=10)
 
-        # Etiqueta e indicador de longitud
         self.label_longitud = ctk.CTkLabel(
             self,
             text=f"Longitud: {self.longitud} caracteres",
@@ -315,7 +293,6 @@ class GenerarContrasenaWindow(ctk.CTkToplevel):
         )
         self.label_longitud.pack(pady=(10, 0))
 
-        # Slider de longitud (de 8 a 32 caracteres)
         self.slider = ctk.CTkSlider(
             self,
             from_=8,
@@ -326,7 +303,6 @@ class GenerarContrasenaWindow(ctk.CTkToplevel):
         self.slider.set(self.longitud)
         self.slider.pack(pady=10, padx=40, fill="x")
 
-        # Fila de botones de control (Regenerar, Copiar)
         self.buttons_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.buttons_frame.pack(pady=15)
 
@@ -350,7 +326,6 @@ class GenerarContrasenaWindow(ctk.CTkToplevel):
         )
         self.btn_copiar.grid(row=0, column=1, padx=10)
 
-        # Label de notificación interna
         self.label_info = ctk.CTkLabel(
             self,
             text="",
@@ -358,11 +333,9 @@ class GenerarContrasenaWindow(ctk.CTkToplevel):
         )
         self.label_info.pack(pady=5)
 
-        # Generar primera contraseña por defecto
         self.regenerar_password()
 
     def center_toplevel(self, parent):
-        """Centra esta ventana sobre su ventana padre."""
         self.update_idletasks()
         parent_x = parent.winfo_rootx()
         parent_y = parent.winfo_rooty()
@@ -375,13 +348,11 @@ class GenerarContrasenaWindow(ctk.CTkToplevel):
         self.geometry(f"+{x}+{y}")
 
     def on_slider_move(self, val):
-        """Maneja el deslizamiento del slider de longitud."""
         self.longitud = int(val)
         self.label_longitud.configure(text=f"Longitud: {self.longitud} caracteres")
         self.regenerar_password()
 
     def regenerar_password(self):
-        """Genera una nueva contraseña y la escribe en el entry."""
         self.password_actual = generar_contrasena_segura(self.longitud)
         self.entry_pass.configure(state="normal")
         self.entry_pass.delete(0, tk.END)
@@ -389,22 +360,16 @@ class GenerarContrasenaWindow(ctk.CTkToplevel):
         self.entry_pass.configure(state="readonly")
 
     def copiar_resultado(self):
-        """Copia la contraseña al portapapeles y alerta al usuario."""
         self.app_root.copiar_al_portapapeles(self.password_actual)
-        
-        # Efecto visual temporal en el botón
         self.btn_copiar.configure(text="¡Copiada!", fg_color="#2ECC71", state="disabled")
         self.after(3000, lambda: self.btn_copiar.configure(text="Copiar", fg_color="#1F6AA5", state="normal"))
-
-        # Mostrar mensaje de advertencia
-        self.label_info.configure(text="Contraseña copiada. Portapapeles se limpiará en 10 segundos.", text_color="#2ECC71")
+        self.label_info.configure(text="Contraseña copiada. Portapapeles se limpiará en 30 segundos.", text_color="#2ECC71")
         self.after(4000, lambda: self.label_info.configure(text=""))
 
 
 class EditarCredencialWindow(ctk.CTkToplevel):
     """
-    Ventana modal para editar una credencial existente.
-    Carga los datos actuales pre-rellenados y realiza un UPDATE en la BD.
+    Ventana modal para editar una credencial existente a través de la API.
     """
     def __init__(
         self,
@@ -412,13 +377,15 @@ class EditarCredencialWindow(ctk.CTkToplevel):
         credencial_id: str,
         sitio_web_actual: str,
         login_user_actual: str,
-        categoria_id_actual,
-        clave_derivada: bytes,
+        categoria_nombre_actual: str,
+        username: str,
+        master_password: str,
         on_save_callback: Callable[[], None]
     ):
         super().__init__(parent)
         self.credencial_id = credencial_id
-        self.clave_derivada = clave_derivada
+        self.username = username
+        self.master_password = master_password
         self.on_save_callback = on_save_callback
 
         self.title("Editar Credencial")
@@ -430,24 +397,20 @@ class EditarCredencialWindow(ctk.CTkToplevel):
         self.focus_force()
         self.center_toplevel(parent)
 
-        # Encabezado
         ctk.CTkLabel(
             self,
             text="Editar Credencial",
             font=ctk.CTkFont(family="Helvetica", size=20, weight="bold")
         ).pack(pady=(20, 15))
 
-        # Campo: Sitio Web (pre-rellenado)
         self.entry_sitio = ctk.CTkEntry(self, width=300, placeholder_text="Sitio Web / Aplicación")
         self.entry_sitio.insert(0, sitio_web_actual)
         self.entry_sitio.pack(pady=8)
 
-        # Campo: Usuario (pre-rellenado)
         self.entry_usuario = ctk.CTkEntry(self, width=300, placeholder_text="Usuario / Correo Electrónico")
         self.entry_usuario.insert(0, login_user_actual)
         self.entry_usuario.pack(pady=8)
 
-        # Fila de contraseña + botón Generar en línea
         self.pass_row = ctk.CTkFrame(self, fg_color="transparent")
         self.pass_row.pack(pady=8)
 
@@ -470,8 +433,7 @@ class EditarCredencialWindow(ctk.CTkToplevel):
         )
         self.btn_generar.pack(side="left")
 
-        # Fila del Slider de longitud + etiqueta dinámica
-        self.longitud_pass = 16  # Valor inicial
+        self.longitud_pass = 16
 
         self.slider_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.slider_frame.pack(pady=(4, 2), padx=20, fill="x")
@@ -488,13 +450,12 @@ class EditarCredencialWindow(ctk.CTkToplevel):
             self.slider_frame,
             from_=8,
             to=30,
-            number_of_steps=22,          # pasos enteros: 8, 9, 10, ... 30
+            number_of_steps=22,
             command=self._on_slider_move
         )
         self.slider_longitud.set(self.longitud_pass)
         self.slider_longitud.pack(fill="x", pady=(0, 4))
 
-        # Checkbox para mostrar/ocultar contraseña
         self.show_pass_var = tk.StringVar(value="off")
         self.check_show_pass = ctk.CTkCheckBox(
             self,
@@ -507,18 +468,15 @@ class EditarCredencialWindow(ctk.CTkToplevel):
         )
         self.check_show_pass.pack(pady=(5, 10))
 
-        # Selector de categoría (con la actual pre-seleccionada)
+        # Selector de categoría desde la API
         self.categorias_map = {}
         categorias_valores = ["Sin Categoría"]
-        nombre_cat_actual = "Sin Categoría"
+        nombre_cat_actual = categoria_nombre_actual or "Sin Categoría"
         try:
-            with get_db_session() as session:
-                cats = session.query(Categoria).order_by(Categoria.nombre).all()
-                for c in cats:
-                    self.categorias_map[c.nombre] = c.id
-                    categorias_valores.append(c.nombre)
-                    if c.id == categoria_id_actual:
-                        nombre_cat_actual = c.nombre
+            cats = obtener_categorias_api()
+            for c in cats:
+                self.categorias_map[c["nombre"]] = c["id"]
+                categorias_valores.append(c["nombre"])
         except Exception as e:
             logger.error(f"Error al cargar categorías en ventana de edición: {e}")
 
@@ -526,11 +484,9 @@ class EditarCredencialWindow(ctk.CTkToplevel):
         self.option_categoria.set(nombre_cat_actual)
         self.option_categoria.pack(pady=8)
 
-        # Mensaje de error
         self.label_error = ctk.CTkLabel(self, text="", text_color="#FF3333", font=ctk.CTkFont(size=12))
         self.label_error.pack(pady=4)
 
-        # Botón Guardar
         ctk.CTkButton(
             self,
             text="Guardar Cambios",
@@ -541,24 +497,20 @@ class EditarCredencialWindow(ctk.CTkToplevel):
         ).pack(pady=(5, 15))
 
     def center_toplevel(self, parent):
-        """Centra la ventana sobre su padre."""
         self.update_idletasks()
         x = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2
         y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
         self.geometry(f"+{x}+{y}")
 
     def _on_slider_move(self, valor):
-        """Actualiza la etiqueta y el estado interno al mover el slider de longitud."""
         self.longitud_pass = int(valor)
         self.label_longitud.configure(text=f"Longitud: {self.longitud_pass} caracteres")
 
     def generar_y_rellenar(self):
-        """Genera una contraseña segura usando la longitud del slider e inserta el resultado en el campo."""
         nueva_pass = generar_contrasena_segura(self.longitud_pass)
-        self.entry_password.configure(show="")   # revelar para que el usuario confirme
+        self.entry_password.configure(show="")
         self.entry_password.delete(0, tk.END)
         self.entry_password.insert(0, nueva_pass)
-        # Activar el checkbox "Mostrar" para que el usuario vea la contraseña generada
         self.show_pass_var.set("on")
         self.check_show_pass.select()
 
@@ -566,7 +518,6 @@ class EditarCredencialWindow(ctk.CTkToplevel):
         self.entry_password.configure(show="" if self.show_pass_var.get() == "on" else "*")
 
     def guardar_cambios(self):
-        """Valida y realiza el UPDATE en la base de datos."""
         sitio = self.entry_sitio.get().strip()
         usuario = self.entry_usuario.get().strip()
         nueva_pass = self.entry_password.get()
@@ -575,58 +526,57 @@ class EditarCredencialWindow(ctk.CTkToplevel):
             self.label_error.configure(text="Sitio web y usuario no pueden estar vacíos.")
             return
 
-        cat_seleccionada = self.option_categoria.get()
-        cat_id = self.categorias_map.get(cat_seleccionada)
+        payload = {
+            "id": self.credencial_id,
+            "username": self.username,
+            "master_password": self.master_password,
+            "sitio_web": sitio,
+            "login_user": usuario
+        }
+        if nueva_pass:
+            payload["password"] = nueva_pass
 
         try:
-            with get_db_session() as session:
-                cred = session.query(Credencial).filter(Credencial.id == self.credencial_id).first()
-                if not cred:
-                    self.label_error.configure(text="Error: credencial no encontrada en la base de datos.")
-                    return
+            response = requests.post(
+                f"{API_BASE_URL}/credentials/update",
+                json=payload,
+                timeout=10
+            )
 
-                cred.sitio_web = sitio
-                cred.login_user = usuario
-                cred.categoria_id = cat_id
+            if response.status_code == 200:
+                logger.info(f"Credencial '{sitio}' (ID: {self.credencial_id}) actualizada vía API.")
+                self.on_save_callback()
+                self.destroy()
+            elif response.status_code == 429:
+                self.label_error.configure(text="Has superado el límite de peticiones. Espera un momento.")
+            else:
+                data = response.json() if response.headers.get("content-type") == "application/json" else {}
+                self.label_error.configure(text=data.get("error", "Error al actualizar la credencial."))
 
-                # Solo re-cifra si el usuario escribió una nueva contraseña
-                if nueva_pass:
-                    cred.password_cifrada = cifrar_contrasena(nueva_pass, self.clave_derivada)
-
-            logger.info(f"Credencial '{sitio}' (ID: {self.credencial_id}) actualizada correctamente.")
-            self.on_save_callback()
-            self.destroy()
-
-        except SQLAlchemyError as e:
-            logger.error(f"Error al actualizar credencial: {e}")
-            self.label_error.configure(text="Error de base de datos al guardar.")
-        except Exception as e:
-            logger.error(f"Error inesperado al editar credencial: {e}")
-            self.label_error.configure(text="Ocurrió un error inesperado.")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error de conexión al actualizar credencial: {e}")
+            self.label_error.configure(text="Error de conexión con el servidor.")
 
 
 class DashboardFrame(ctk.CTkFrame):
     """
     Frame principal que representa la bóveda una vez que el usuario inicia sesión.
+    Conecta exclusivamente con la API REST en Render.
     """
-    def __init__(self, parent: ctk.CTk, usuario_id: str, clave_derivada: bytes, usuario_nombre: str, on_logout: Callable[[], None]):
+    def __init__(self, parent: ctk.CTk, username: str, master_password: str, on_logout: Callable[[], None]):
         super().__init__(parent, fg_color="transparent")
         self.parent = parent
-        self.usuario_id = usuario_id
-        self.clave_derivada = clave_derivada
-        self.usuario_nombre = usuario_nombre
+        self.username = username
+        self.master_password = master_password
         self.on_logout = on_logout
         self._notif_timer = None
-        self._mostrar_timers = {}  # Rastrear temporizadores activos para mostrar contraseñas
+        self._mostrar_timers = {}
 
-        # 1. Estructura de Ventana Principal: Grid Layout de 2 columnas
-        # Columna 0: Sidebar (200px ancho)
-        # Columna 1: Panel de Contenido (Resto del espacio, expandible)
         self.grid_columnconfigure(0, weight=0, minsize=200)
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        # 1.1. Barra Lateral / Sidebar (Columna 0)
+        # Sidebar
         self.sidebar_frame = ctk.CTkFrame(
             self,
             width=200,
@@ -637,7 +587,6 @@ class DashboardFrame(ctk.CTkFrame):
         self.sidebar_frame.grid(row=0, column=0, sticky="nsew")
         self.sidebar_frame.grid_propagate(False)
 
-        # Título "LOCKBOX" en negrita e índigo (#6366F1)
         self.label_lockbox = ctk.CTkLabel(
             self.sidebar_frame,
             text="LOCKBOX",
@@ -646,12 +595,11 @@ class DashboardFrame(ctk.CTkFrame):
         )
         self.label_lockbox.pack(pady=(30, 25), padx=20, anchor="w")
 
-        # Botones de navegación
         self.btn_mi_boveda = ctk.CTkButton(
             self.sidebar_frame,
             text="🔑 Mi Bóveda",
             font=ctk.CTkFont(family="Helvetica", size=14, weight="bold"),
-            fg_color="#1E293B",  # Botón activo/seleccionado
+            fg_color="#1E293B",
             hover_color="#334155",
             anchor="w",
             height=40
@@ -670,7 +618,6 @@ class DashboardFrame(ctk.CTkFrame):
         )
         self.btn_generador.pack(pady=6, padx=15, fill="x")
 
-        # Botón Cerrar Sesión en la parte inferior
         self.btn_logout = ctk.CTkButton(
             self.sidebar_frame,
             text="Cerrar Sesión",
@@ -682,7 +629,7 @@ class DashboardFrame(ctk.CTkFrame):
         )
         self.btn_logout.pack(side="bottom", pady=25, padx=15, fill="x")
 
-        # 1.2. Panel de Contenido (Columna 1)
+        # Panel de Contenido
         self.content_panel = ctk.CTkFrame(
             self,
             fg_color="transparent",
@@ -691,11 +638,11 @@ class DashboardFrame(ctk.CTkFrame):
         self.content_panel.grid(row=0, column=1, sticky="nsew", padx=20, pady=20)
         
         self.content_panel.grid_columnconfigure(0, weight=1)
-        self.content_panel.grid_rowconfigure(0, weight=0)  # Barra de Búsqueda
-        self.content_panel.grid_rowconfigure(1, weight=0)  # Controles de filtro y adición
-        self.content_panel.grid_rowconfigure(2, weight=1)  # Bóveda / ScrollableFrame
+        self.content_panel.grid_rowconfigure(0, weight=0)
+        self.content_panel.grid_rowconfigure(1, weight=0)
+        self.content_panel.grid_rowconfigure(2, weight=1)
 
-        # Barra de Búsqueda (ancho completo)
+        # Barra de Búsqueda
         self.search_entry = ctk.CTkEntry(
             self.content_panel,
             height=45,
@@ -705,23 +652,19 @@ class DashboardFrame(ctk.CTkFrame):
         self.search_entry.grid(row=0, column=0, sticky="ew", pady=(0, 15))
         self.search_entry.bind("<KeyRelease>", lambda e: self.cargar_credenciales())
 
-        # Contenedor de Controles (Dropdown, Notificaciones, Botón Agregar)
+        # Contenedor de Controles
         self.controls_frame = ctk.CTkFrame(self.content_panel, fg_color="transparent", border_width=0)
         self.controls_frame.grid(row=1, column=0, sticky="ew", pady=(0, 15))
-        self.controls_frame.grid_columnconfigure(0, weight=0) # Dropdown
-        self.controls_frame.grid_columnconfigure(1, weight=1) # Notificación
-        self.controls_frame.grid_columnconfigure(2, weight=0) # Botón Agregar
+        self.controls_frame.grid_columnconfigure(0, weight=0)
+        self.controls_frame.grid_columnconfigure(1, weight=1)
+        self.controls_frame.grid_columnconfigure(2, weight=0)
 
-        # Variable y menú de categorías
         self.categoria_var = tk.StringVar(value="Todas")
-        self.categorias_map = {}
         category_values = ["Todas"]
         try:
-            with get_db_session() as session:
-                cats = session.query(Categoria).order_by(Categoria.nombre).all()
-                for c in cats:
-                    self.categorias_map[c.nombre] = c.id
-                    category_values.append(c.nombre)
+            cats = obtener_categorias_api()
+            for c in cats:
+                category_values.append(c["nombre"])
         except Exception as e:
             logger.error(f"Error al cargar categorías para filtro: {e}")
 
@@ -734,7 +677,6 @@ class DashboardFrame(ctk.CTkFrame):
         )
         self.categoria_menu.grid(row=0, column=0, sticky="w")
 
-        # Label para avisos temporales
         self.label_notificacion = ctk.CTkLabel(
             self.controls_frame,
             text="",
@@ -742,7 +684,6 @@ class DashboardFrame(ctk.CTkFrame):
         )
         self.label_notificacion.grid(row=0, column=1, padx=10)
 
-        # Botón Agregar Credencial
         self.btn_agregar = ctk.CTkButton(
             self.controls_frame,
             text="+ Agregar Credencial",
@@ -752,27 +693,21 @@ class DashboardFrame(ctk.CTkFrame):
         )
         self.btn_agregar.grid(row=0, column=2, sticky="e")
 
-        # Contenedor con scroll para las tarjetas de credenciales
         self.scroll_frame = ctk.CTkScrollableFrame(self.content_panel, fg_color="transparent")
         self.scroll_frame.grid(row=2, column=0, sticky="nsew")
 
-        # Cargar las credenciales inicialmente
         self.cargar_credenciales()
 
     def mostrar_notificacion_temporal(self, mensaje: str, es_error: bool = False):
-        """Muestra una notificación visual en la parte superior central de la bóveda."""
         color = "#FF3333" if es_error else "#2ECC71"
         self.label_notificacion.configure(text=mensaje, text_color=color)
 
         if self._notif_timer:
             self.after_cancel(self._notif_timer)
 
-        # Limpiar el mensaje a los 4 segundos
         self._notif_timer = self.after(4000, lambda: self.label_notificacion.configure(text=""))
 
     def cargar_credenciales(self):
-        """Consulta la base de datos y dibuja la lista de credenciales según filtros de búsqueda y categoría."""
-        # Cancelar todos los temporizadores de Mostrar activos antes de reconstruir la UI
         for timer_id in list(self._mostrar_timers.values()):
             try:
                 self.after_cancel(timer_id)
@@ -783,54 +718,64 @@ class DashboardFrame(ctk.CTkFrame):
         for widget in self.scroll_frame.winfo_children():
             widget.destroy()
 
-        # Obtener filtros de la UI
-        texto_busqueda = self.search_entry.get().strip()
+        texto_busqueda = self.search_entry.get().strip().lower()
         categoria_seleccionada = self.categoria_var.get()
 
         try:
-            with get_db_session() as session:
-                query = session.query(Credencial).filter(Credencial.usuario_id == self.usuario_id)
+            response = requests.post(
+                f"{API_BASE_URL}/credentials",
+                json={
+                    "username": self.username,
+                    "master_password": self.master_password
+                },
+                timeout=10
+            )
 
-                # Filtro por categoría
+            if response.status_code == 200:
+                credenciales = response.json().get("credenciales", [])
+
+                # Filtrar por categoría
                 if categoria_seleccionada != "Todas":
-                    cat_id = self.categorias_map.get(categoria_seleccionada)
-                    if cat_id:
-                        query = query.filter(Credencial.categoria_id == cat_id)
+                    credenciales = [c for c in credenciales if c.get("categoria") == categoria_seleccionada]
 
-                # Filtro por texto (sitio o usuario) usando ILIKE
+                # Filtrar por texto de búsqueda
                 if texto_busqueda:
-                    pattern = f"%{texto_busqueda}%"
-                    query = query.filter(or_(Credencial.sitio_web.ilike(pattern),
-                                             Credencial.login_user.ilike(pattern)))
-
-                credenciales = query.order_by(Credencial.sitio_web).all()
+                    credenciales = [
+                        c for c in credenciales
+                        if texto_busqueda in c.get("sitio_web", "").lower()
+                        or texto_busqueda in c.get("login_user", "").lower()
+                    ]
 
                 if not credenciales:
                     self.mostrar_mensaje_vacio()
                     return
 
                 for i, cred in enumerate(credenciales):
-                    pass_cifrada_bytes = bytes(cred.password_cifrada)
                     self.crear_tarjeta_credencial(
-                        credencial_id=str(cred.id),
-                        sitio_web=cred.sitio_web,
-                        login_user=cred.login_user,
-                        password_cifrada=pass_cifrada_bytes,
-                        categoria_id=cred.categoria_id,
+                        credencial_id=cred.get("id"),
+                        sitio_web=cred.get("sitio_web"),
+                        login_user=cred.get("login_user"),
+                        password=cred.get("password"),
+                        categoria_nombre=cred.get("categoria"),
                         index=i
                     )
-        
-        except SQLAlchemyError as e:
-            logger.error(f"Error al cargar las credenciales de la BD: {e}")
+            elif response.status_code == 429:
+                self.mostrar_notificacion_temporal("Límite de peticiones alcanzado (Rate Limit). Espera un momento.", es_error=True)
+            else:
+                data = response.json() if response.headers.get("content-type") == "application/json" else {}
+                err_msg = data.get("error", "Error al cargar credenciales.")
+                self.mostrar_notificacion_temporal(err_msg, es_error=True)
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error al cargar las credenciales vía API: {e}")
             label_error = ctk.CTkLabel(
                 self.scroll_frame,
-                text="Error al conectar con la base de datos para cargar las credenciales.",
+                text="Error al conectar con la API en Render para cargar las credenciales.",
                 text_color="#FF3333"
             )
             label_error.pack(pady=20)
 
     def mostrar_mensaje_vacio(self):
-        """Muestra un mensaje informativo si no hay credenciales registradas."""
         self.container_vacio = ctk.CTkFrame(self.scroll_frame, fg_color="transparent")
         self.container_vacio.pack(expand=True, fill="both", pady=80)
         
@@ -855,12 +800,10 @@ class DashboardFrame(ctk.CTkFrame):
         credencial_id: str,
         sitio_web: str,
         login_user: str,
-        password_cifrada: bytes,
-        categoria_id,
+        password: str,
+        categoria_nombre: str,
         index: int
     ):
-        """Dibuja una tarjeta individual con botones Mostrar, Copiar Usuario, Copiar Contraseña, Editar y Eliminar."""
-        # 3. Tarjeta de Credenciales con bordes redondeados y borde
         card = ctk.CTkFrame(
             self.scroll_frame,
             height=100,
@@ -870,15 +813,13 @@ class DashboardFrame(ctk.CTkFrame):
         card.pack(fill="x", pady=6, padx=5)
         card.pack_propagate(False)
 
-        card.grid_columnconfigure(0, weight=1)   # Contenedor de texto
-        card.grid_columnconfigure(1, weight=0)   # Contenedor de botones
+        card.grid_columnconfigure(0, weight=1)
+        card.grid_columnconfigure(1, weight=0)
         card.grid_rowconfigure(0, weight=1)
 
-        # Contenedor de texto (Sitio, Usuario y Password oculta) - border_width=0 to float text
         text_container = ctk.CTkFrame(card, fg_color="transparent", border_width=0)
         text_container.grid(row=0, column=0, sticky="w", padx=25, pady=8)
 
-        # Título del sitio en celeste (#38BDF8)
         label_sitio = ctk.CTkLabel(
             text_container,
             text=sitio_web,
@@ -906,11 +847,9 @@ class DashboardFrame(ctk.CTkFrame):
         )
         label_pass.pack(anchor="w")
 
-        # Contenedor de botones alineados a la derecha - border_width=0
         buttons_container = ctk.CTkFrame(card, fg_color="transparent", border_width=0)
         buttons_container.grid(row=0, column=1, sticky="e", padx=15, pady=8)
 
-        # Botón Mostrar
         btn_mostrar = ctk.CTkButton(
             buttons_container,
             text="Mostrar",
@@ -921,12 +860,11 @@ class DashboardFrame(ctk.CTkFrame):
             hover_color="#475569"
         )
         btn_mostrar.configure(
-            command=lambda p=password_cifrada, lp=label_pass, bm=btn_mostrar, cid=credencial_id:
+            command=lambda p=password, lp=label_pass, bm=btn_mostrar, cid=credencial_id:
                 self.toggle_mostrar_contrasena(p, lp, bm, cid)
         )
         btn_mostrar.pack(side="left", padx=4)
 
-        # Botón Copiar Usuario ("👤 Usuario")
         btn_copiar_user = ctk.CTkButton(
             buttons_container,
             text="👤 Usuario",
@@ -942,7 +880,6 @@ class DashboardFrame(ctk.CTkFrame):
         )
         btn_copiar_user.pack(side="left", padx=4)
 
-        # Botón Copiar Contraseña ("🔑 Clave")
         btn_copiar_pass = ctk.CTkButton(
             buttons_container,
             text="🔑 Clave",
@@ -953,12 +890,11 @@ class DashboardFrame(ctk.CTkFrame):
             hover_color="#475569"
         )
         btn_copiar_pass.configure(
-            command=lambda p=password_cifrada, b=btn_copiar_pass, s=sitio_web, u=login_user:
-                self.copiar_contrasena(p, b, s, u)
+            command=lambda p=password, b=btn_copiar_pass:
+                self.copiar_contrasena(p, b)
         )
         btn_copiar_pass.pack(side="left", padx=4)
 
-        # Botón Editar
         btn_editar = ctk.CTkButton(
             buttons_container,
             text="Editar",
@@ -969,12 +905,11 @@ class DashboardFrame(ctk.CTkFrame):
             hover_color="#475569"
         )
         btn_editar.configure(
-            command=lambda cid=credencial_id, s=sitio_web, u=login_user, catid=categoria_id:
-                self.abrir_ventana_editar(cid, s, u, catid)
+            command=lambda cid=credencial_id, s=sitio_web, u=login_user, catname=categoria_nombre:
+                self.abrir_ventana_editar(cid, s, u, catname)
         )
         btn_editar.pack(side="left", padx=4)
 
-        # Botón Eliminar (Rojo desaturado/elegante)
         btn_eliminar = ctk.CTkButton(
             buttons_container,
             text="Eliminar",
@@ -991,51 +926,31 @@ class DashboardFrame(ctk.CTkFrame):
         btn_eliminar.pack(side="left", padx=4)
 
     def copiar_usuario(self, usuario: str, boton: ctk.CTkButton):
-        """Copia el usuario al portapapeles y da retroalimentación visual."""
         import pyperclip
         try:
             pyperclip.copy(usuario)
-            logger.info("Usuario copiado al portapapeles.")
-            
-            # Retroalimentación visual temporal (green feedback, then reset to slate)
             boton.configure(text="¡Copiado!", fg_color="#059669", state="disabled")
             self.after(2000, lambda: boton.configure(text="👤 Usuario", fg_color="#334155", state="normal"))
-            
             self.mostrar_notificacion_temporal("¡Usuario copiado al portapapeles!")
         except Exception as e:
             logger.error(f"Error al copiar usuario: {e}")
 
-    def toggle_mostrar_contrasena(self, password_cifrada: bytes, label_pass: ctk.CTkLabel, boton_mostrar: ctk.CTkButton, credencial_id: str):
-        """Alterna entre mostrar y ocultar la contraseña en texto plano con un timeout de 15 segundos."""
-        # Cancelar cualquier temporizador activo para esta credencial
+    def toggle_mostrar_contrasena(self, password: str, label_pass: ctk.CTkLabel, boton_mostrar: ctk.CTkButton, credencial_id: str):
         if credencial_id in self._mostrar_timers:
             self.after_cancel(self._mostrar_timers[credencial_id])
             del self._mostrar_timers[credencial_id]
 
         if boton_mostrar.cget("text") == "Mostrar":
-            try:
-                datos_bytes = bytes(password_cifrada)
-                pass_plana = descifrar_contrasena(datos_bytes, self.clave_derivada)
-                
-                # Actualizar UI
-                label_pass.configure(text=pass_plana, text_color="#2ECC71")
-                boton_mostrar.configure(text="Ocultar", fg_color="#475569", hover_color="#64748B")
-                
-                # Programar ocultación automática tras 15 segundos
-                timer_id = self.after(15000, lambda: self.ocultar_contrasena_auto(label_pass, boton_mostrar, credencial_id))
-                self._mostrar_timers[credencial_id] = timer_id
-                
-            except Exception as e:
-                print(f"Error detallado al descifrar para mostrar: {e}")
-                logger.error(f"Error al descifrar para mostrar: {e}")
-                messagebox.showerror("Error", f"No se pudo descifrar la contraseña.\nDetalle: {e}")
+            label_pass.configure(text=password, text_color="#2ECC71")
+            boton_mostrar.configure(text="Ocultar", fg_color="#475569", hover_color="#64748B")
+            
+            timer_id = self.after(15000, lambda: self.ocultar_contrasena_auto(label_pass, boton_mostrar, credencial_id))
+            self._mostrar_timers[credencial_id] = timer_id
         else:
-            # Ocultar manualmente
             label_pass.configure(text="••••••••", text_color="#64748B")
             boton_mostrar.configure(text="Mostrar", fg_color="#334155", hover_color="#475569")
 
     def ocultar_contrasena_auto(self, label_pass: ctk.CTkLabel, boton_mostrar: ctk.CTkButton, credencial_id: str):
-        """Oculta la contraseña automáticamente al expirar el temporizador de 15 segundos."""
         if label_pass.winfo_exists():
             label_pass.configure(text="••••••••", text_color="#64748B")
         if boton_mostrar.winfo_exists():
@@ -1043,31 +958,17 @@ class DashboardFrame(ctk.CTkFrame):
         if credencial_id in self._mostrar_timers:
             del self._mostrar_timers[credencial_id]
 
-    def copiar_contrasena(self, password_cifrada: bytes, boton: ctk.CTkButton, sitio: str, usuario: str):
-        """Descifra la contraseña, la copia al portapapeles e inicia el temporizador de 30s."""
+    def copiar_contrasena(self, password: str, boton: ctk.CTkButton):
         try:
-            # Asegurar conversión explícita a bytes antes de descifrar (resuelve memoryview en drivers como psycopg2)
-            datos_bytes = bytes(password_cifrada)
-            pass_plana = descifrar_contrasena(datos_bytes, self.clave_derivada)
-            
-            # Utilizar función centralizada de copia en el objeto App raíz
-            self.parent.copiar_al_portapapeles(pass_plana)
-
-            # Efecto visual en el botón de la tarjeta
+            self.parent.copiar_al_portapapeles(password)
             boton.configure(text="¡Copiada!", fg_color="#059669", state="disabled")
             self.after(3000, lambda: boton.configure(text="🔑 Clave", fg_color="#334155", state="normal"))
-
-            # Mostrar mensaje de notificación
             self.mostrar_notificacion_temporal("¡Contraseña copiada al portapapeles! Se limpiará en 30 segundos.")
-            
         except Exception as e:
-            # Imprimir el error original detallado en la consola de Python para depuración
-            print(f"Error detallado: {e}")
-            logger.error(f"Error al descifrar o copiar contraseña de '{sitio}' para el usuario '{usuario}': {e}")
-            messagebox.showerror("Error", f"No se pudo descifrar la contraseña.\nDetalle: {e}")
+            logger.error(f"Error al copiar contraseña: {e}")
+            messagebox.showerror("Error", f"No se pudo copiar la contraseña.\nDetalle: {e}")
 
     def eliminar_credencial(self, credencial_id: str, sitio_web: str):
-        """Pide confirmación y elimina la credencial de la base de datos."""
         confirmar = messagebox.askyesno(
             title="Confirmar eliminación",
             message=f"¿Estás seguro de que deseas eliminar la credencial de '{sitio_web}'?\n\nEsta acción no se puede deshacer."
@@ -1076,40 +977,52 @@ class DashboardFrame(ctk.CTkFrame):
             return
 
         try:
-            with get_db_session() as session:
-                cred = session.query(Credencial).filter(Credencial.id == credencial_id).first()
-                if cred:
-                    session.delete(cred)
-            logger.info(f"Credencial '{sitio_web}' (ID: {credencial_id}) eliminada correctamente.")
-            self.mostrar_notificacion_temporal(f"Credencial '{sitio_web}' eliminada.")
-            self.cargar_credenciales()
-        except SQLAlchemyError as e:
-            logger.error(f"Error al eliminar credencial: {e}")
-            messagebox.showerror("Error", f"No se pudo eliminar la credencial.\nDetalle: {e}")
+            response = requests.post(
+                f"{API_BASE_URL}/credentials/delete",
+                json={
+                    "id": credencial_id,
+                    "username": self.username,
+                    "master_password": self.master_password
+                },
+                timeout=10
+            )
 
-    def abrir_ventana_editar(self, credencial_id: str, sitio_web: str, login_user: str, categoria_id):
-        """Abre la ventana modal para editar una credencial existente."""
+            if response.status_code == 200:
+                logger.info(f"Credencial '{sitio_web}' (ID: {credencial_id}) eliminada vía API.")
+                self.mostrar_notificacion_temporal(f"Credencial '{sitio_web}' eliminada.")
+                self.cargar_credenciales()
+            elif response.status_code == 429:
+                messagebox.showerror("Límite superado", "Has alcanzado el límite de intentos. Por favor espera un momento.")
+            else:
+                data = response.json() if response.headers.get("content-type") == "application/json" else {}
+                err_msg = data.get("error", "No se pudo eliminar la credencial.")
+                messagebox.showerror("Error", err_msg)
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error al eliminar credencial vía API: {e}")
+            messagebox.showerror("Error de Conexión", f"No se pudo conectar con el servidor.\nDetalle: {e}")
+
+    def abrir_ventana_editar(self, credencial_id: str, sitio_web: str, login_user: str, categoria_nombre: str):
         EditarCredencialWindow(
             parent=self,
             credencial_id=credencial_id,
             sitio_web_actual=sitio_web,
             login_user_actual=login_user,
-            categoria_id_actual=categoria_id,
-            clave_derivada=self.clave_derivada,
+            categoria_nombre_actual=categoria_nombre,
+            username=self.username,
+            master_password=self.master_password,
             on_save_callback=self.cargar_credenciales
         )
 
     def abrir_ventana_agregar(self):
-        """Abre la ventana modal para registrar una nueva credencial."""
         AgregarCredencialWindow(
-            self, 
-            usuario_id=self.usuario_id, 
-            clave_derivada=self.clave_derivada, 
+            self,
+            username=self.username,
+            master_password=self.master_password,
             on_save_callback=self.cargar_credenciales
         )
 
     def abrir_ventana_generador(self):
-        """Abre la ventana modal del generador de contraseñas."""
         GenerarContrasenaWindow(self, self.parent)
 
 
@@ -1117,29 +1030,20 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        # Configuración básica de la ventana de login
-        self.title("Gestor de Contraseñas Local - Acceso")
+        self.title("Gestor de Contraseñas Lockbox")
         self.geometry("450x550")
         self.resizable(False, False)
-
-        # Centrar la ventana en la pantalla al iniciar
         self.center_window()
 
-        # Variables de sesión y estado
-        self.usuario_id = None
-        self.clave_derivada = None
-        self.usuario_nombre = None
+        self.username = None
+        self.master_password = None
         self.dashboard_frame = None
-        self._clipboard_timer = None  # Identificador para limpiar el portapapeles
+        self._clipboard_timer = None
 
-        # Construir la interfaz de login inicial
         self.setup_login_ui()
-
-        # Asegurar que las tablas estén inicializadas
-        self.check_database_connection()
+        self.check_api_connection()
 
     def center_window(self):
-        """Centra la ventana en la pantalla del usuario."""
         self.update_idletasks()
         width = self.winfo_width()
         height = self.winfo_height()
@@ -1147,30 +1051,24 @@ class App(ctk.CTk):
         y = (self.winfo_screenheight() // 2) - (height // 2)
         self.geometry(f"{width}x{height}+{x}+{y}")
 
-    def check_database_connection(self):
-        """Verifica que la base de datos esté activa e inicializa las tablas."""
+    def check_api_connection(self):
+        """Verifica la conectividad inicial con la API en Render."""
         try:
-            success = init_db()
-            if not success:
-                self.show_status("Error: No se pudo inicializar la base de datos. Verifica el archivo .env", is_error=True)
-                messagebox.showerror(
-                    "Error de Base de Datos",
-                    "No se pudo conectar a la base de datos PostgreSQL.\n"
-                    "Por favor, asegúrate de que el servicio de PostgreSQL esté iniciado y "
-                    "las credenciales en el archivo .env sean correctas."
-                )
-        except Exception as e:
-            logger.error(f"Excepción en la conexión de base de datos inicial: {e}")
-            self.show_status("Error de conexión con la base de datos.", is_error=True)
+            response = requests.get(f"{API_BASE_URL}/ping", timeout=5)
+            if response.status_code == 200:
+                logger.info("Conexión con la API en Render verificada con éxito.")
+            else:
+                self.show_status("Advertencia: El servidor respondió con un estado inesperado.", is_error=True)
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"No se pudo conectar con la API en {API_BASE_URL}: {e}")
+            self.show_status("API no conectada (Render puede estar iniciando...).", is_error=True)
 
     def show_status(self, message: str, is_error: bool = False):
-        """Muestra un mensaje de estado en la parte inferior de la ventana de login."""
         color = "#FF3333" if is_error else "#2ECC71"
         if hasattr(self, 'status_label') and self.status_label.winfo_exists():
             self.status_label.configure(text=message, text_color=color)
 
     def setup_login_ui(self):
-        """Crea todos los widgets correspondientes al Login/Registro."""
         if self.dashboard_frame:
             self.dashboard_frame.destroy()
             self.dashboard_frame = None
@@ -1185,7 +1083,7 @@ class App(ctk.CTk):
 
         self.subtitle_label = ctk.CTkLabel(
             self, 
-            text="Tu gestor de contraseñas local seguro", 
+            text="Tu gestor de contraseñas seguro en la Nube", 
             font=ctk.CTkFont(family="Helvetica", size=14, slant="italic"),
             text_color="#888888"
         )
@@ -1222,7 +1120,6 @@ class App(ctk.CTk):
         self.login_button = ctk.CTkButton(container, text="Ingresar", width=280, command=self.handle_login)
         self.login_button.pack(pady=20)
 
-        # Texto interactivo debajo del botón
         link_olvido = ctk.CTkLabel(
             master=container,
             text="¿Olvidaste tu usuario o contraseña?",
@@ -1231,8 +1128,6 @@ class App(ctk.CTk):
             font=("Arial", 11, "underline")
         )
         link_olvido.pack(pady=(12, 0))
-
-        # Vincular clic para abrir la ventana de recuperación
         link_olvido.bind("<Button-1>", lambda e: self.abrir_ventana_recuperacion())
 
     def setup_register_tab(self):
@@ -1257,18 +1152,15 @@ class App(ctk.CTk):
         self.register_button.pack(pady=20)
 
     def abrir_ventana_recuperacion(self):
-        # Ventana emergente (TopLevel)
         win_recovery = ctk.CTkToplevel(self)
         win_recovery.title("Recuperar Cuenta - Lockbox")
         win_recovery.geometry("420x450")
         win_recovery.resizable(False, False)
         
-        # Mantener la ventana al frente
         win_recovery.transient(self)
         win_recovery.grab_set()
         win_recovery.focus_force()
 
-        # Centrar la ventana secundaria con respecto a la principal
         win_recovery.update_idletasks()
         parent_x = self.winfo_rootx()
         parent_y = self.winfo_rooty()
@@ -1277,7 +1169,6 @@ class App(ctk.CTk):
         
         w = 420
         h = 450
-        
         x = parent_x + (parent_w - w) // 2
         y = parent_y + (parent_h - h) // 2
         win_recovery.geometry(f"{w}x{h}+{x}+{y}")
@@ -1285,13 +1176,11 @@ class App(ctk.CTk):
         title = ctk.CTkLabel(win_recovery, text="Restablecer Contraseña", font=("Arial", 18, "bold"))
         title.pack(pady=(20, 10))
 
-        # Mensaje de Advertencia
         warning_box = ctk.CTkTextbox(win_recovery, width=360, height=80, activate_scrollbars=False)
         warning_box.insert("1.0", "⚠️ IMPORTANTE:\nPara restablecer tu acceso necesitas la Clave de Recuperación que se te proporcionó al registrarte. Lockbox no guarda tu contraseña maestra.")
         warning_box.configure(state="disabled", text_color="#ffcc00", fg_color="#2b2b2b")
         warning_box.pack(pady=5)
 
-        # Entradas de texto
         user_entry = ctk.CTkEntry(win_recovery, placeholder_text="Nombre de usuario", width=340)
         user_entry.pack(pady=8)
 
@@ -1310,14 +1199,28 @@ class App(ctk.CTk):
                 messagebox.showerror("Error", "Por favor completa todos los campos.", parent=win_recovery)
                 return
 
-            # 🔗 Llamada al backend
-            exito, mensaje = restablecer_password(usuario, clave_rec, nueva_pass)
-            
-            if exito:
-                messagebox.showinfo("¡Éxito!", mensaje, parent=win_recovery)
-                win_recovery.destroy()
-            else:
-                messagebox.showerror("Error de Autenticación", mensaje, parent=win_recovery)
+            try:
+                response = requests.post(
+                    f"{API_BASE_URL}/recover",
+                    json={
+                        "username": usuario,
+                        "recovery_key": clave_rec,
+                        "new_master_password": nueva_pass
+                    },
+                    timeout=10
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    messagebox.showinfo("¡Éxito!", data.get("message", "Contraseña restablecida correctamente."), parent=win_recovery)
+                    win_recovery.destroy()
+                elif response.status_code == 429:
+                    messagebox.showerror("Límite superado", "Has intentado demasiadas veces. Por favor espera un momento.", parent=win_recovery)
+                else:
+                    data = response.json() if response.headers.get("content-type") == "application/json" else {}
+                    err_msg = data.get("error", "No se pudo restablecer la contraseña.")
+                    messagebox.showerror("Error de Autenticación", err_msg, parent=win_recovery)
+            except requests.exceptions.RequestException as e:
+                messagebox.showerror("Error de Conexión", f"No se pudo conectar con el servidor.\nDetalle: {e}", parent=win_recovery)
 
         btn_restablecer = ctk.CTkButton(
             win_recovery, 
@@ -1330,7 +1233,6 @@ class App(ctk.CTk):
         btn_restablecer.pack(pady=20)
 
     def destroy_login_ui(self):
-        """Destruye y limpia todos los widgets del formulario de login."""
         self.title_label.destroy()
         self.subtitle_label.destroy()
         self.tabview.destroy()
@@ -1344,34 +1246,31 @@ class App(ctk.CTk):
             self.show_status("Por favor, llena todos los campos.", is_error=True)
             return
 
-        self.show_status("Verificando credenciales...")
-        
+        self.show_status("Verificando credenciales con la API...")
+
         try:
-            with get_db_session() as session:
-                usuario = session.query(Usuario).filter_by(username=username).first()
-                
-                if not usuario:
-                    self.show_status("Nombre de usuario o contraseña incorrectos.", is_error=True)
-                    return
-                
-                es_valido = verificar_hash_maestro(password, usuario.master_hash)
-                
-                if es_valido:
-                    self.usuario_id = usuario.id
-                    self.usuario_nombre = usuario.username
-                    self.clave_derivada = derivar_clave_fernet(password, usuario.salt_derivacion)
-                    
-                    logger.info(f"Acceso concedido a la bóveda para el usuario: {username}")
-                    self.mostrar_dashboard()
-                else:
-                    self.show_status("Nombre de usuario o contraseña incorrectos.", is_error=True)
-                    
-        except SQLAlchemyError as db_err:
-            logger.error(f"Error de base de datos durante login: {db_err}")
-            self.show_status("Error de conexión a la base de datos.", is_error=True)
-        except Exception as err:
-            logger.error(f"Error inesperado en login: {err}")
-            self.show_status("Ocurrió un error inesperado al procesar la solicitud.", is_error=True)
+            response = requests.post(
+                f"{API_BASE_URL}/login",
+                json={"username": username, "master_password": password},
+                timeout=15
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                self.username = data.get("username", username)
+                self.master_password = password
+                logger.info(f"Acceso concedido vía API a la bóveda para el usuario: {username}")
+                self.mostrar_dashboard()
+            elif response.status_code == 429:
+                self.show_status("Has superado el límite de intentos. Por favor, espera un momento.", is_error=True)
+            else:
+                data = response.json() if response.headers.get("content-type") == "application/json" else {}
+                err_msg = data.get("error", "Nombre de usuario o contraseña incorrectos.")
+                self.show_status(err_msg, is_error=True)
+
+        except requests.exceptions.RequestException as err:
+            logger.error(f"Error de conexión durante login: {err}")
+            self.show_status("Error de conexión con el servidor API en Render.", is_error=True)
 
     def handle_register(self):
         username = self.register_user_entry.get().strip()
@@ -1385,80 +1284,64 @@ class App(ctk.CTk):
             self.show_status("La contraseña maestra debe tener al menos 8 caracteres.", is_error=True)
             return
 
-        self.show_status("Registrando usuario...")
+        self.show_status("Registrando usuario en la API...")
 
         try:
-            # Generar clave de recuperación para el usuario
-            clave_raw = generar_clave_recuperacion()
-
-            with get_db_session() as session:
-                usuario_existente = session.query(Usuario).filter_by(username=username).first()
-                if usuario_existente:
-                    self.show_status("El nombre de usuario ya está registrado.", is_error=True)
-                    return
-
-                hash_maestro = generar_hash_maestro(password)
-                salt_derivacion = generar_salt_derivacion()
-                hash_recuperacion = generar_hash_maestro(clave_raw)
-
-                nuevo_usuario = Usuario(
-                    username=username,
-                    master_hash=hash_maestro,
-                    salt_derivacion=salt_derivacion,
-                    recovery_key_hash=hash_recuperacion
-                )
-                session.add(nuevo_usuario)
-                
-            self.show_status("¡Usuario registrado con éxito! Ya puedes iniciar sesión.", is_error=False)
-            logger.info(f"Usuario '{username}' registrado correctamente.")
-
-            # Mostrar la clave de recuperación al usuario
-            msg = (
-                f"Tu Clave de Recuperación es:\n\n{clave_raw}\n\n"
-                "⚠️ IMPORTANTE:\nAnótala en un papel o lugar seguro. No la podrás volver a ver.\n"
-                "La necesitarás para restablecer tu contraseña maestra si la olvidas."
+            response = requests.post(
+                f"{API_BASE_URL}/register",
+                json={"username": username, "master_password": password},
+                timeout=15
             )
-            messagebox.showinfo("Clave de Recuperación - Lockbox", msg, parent=self)
-            
-            self.register_user_entry.delete(0, tk.END)
-            self.register_pass_entry.delete(0, tk.END)
-            
-            self.tabview.set("Iniciar Sesión")
-            self.login_user_entry.delete(0, tk.END)
-            self.login_user_entry.insert(0, username)
-            
-        except SQLAlchemyError as db_err:
-            logger.error(f"Error de base de datos durante registro: {db_err}")
-            self.show_status("Error de conexión a la base de datos.", is_error=True)
-        except Exception as err:
-            logger.error(f"Error inesperado en registro: {err}")
-            self.show_status("Ocurrió un error inesperado al procesar la solicitud.", is_error=True)
+
+            if response.status_code == 201:
+                data = response.json()
+                clave_raw = data.get("recovery_key", "")
+                self.show_status("¡Usuario registrado con éxito! Ya puedes iniciar sesión.", is_error=False)
+                logger.info(f"Usuario '{username}' registrado correctamente vía API.")
+
+                msg = (
+                    f"Tu Clave de Recuperación es:\n\n{clave_raw}\n\n"
+                    "⚠️ IMPORTANTE:\nAnótala en un papel o lugar seguro. No la podrás volver a ver.\n"
+                    "La necesitarás para restablecer tu contraseña maestra si la olvidas."
+                )
+                messagebox.showinfo("Clave de Recuperación - Lockbox", msg, parent=self)
+
+                self.register_user_entry.delete(0, tk.END)
+                self.register_pass_entry.delete(0, tk.END)
+
+                self.tabview.set("Iniciar Sesión")
+                self.login_user_entry.delete(0, tk.END)
+                self.login_user_entry.insert(0, username)
+
+            elif response.status_code == 429:
+                self.show_status("Has superado el límite de registros por minuto. Espera un momento.", is_error=True)
+            else:
+                data = response.json() if response.headers.get("content-type") == "application/json" else {}
+                err_msg = data.get("error", "Error al registrar el usuario.")
+                self.show_status(err_msg, is_error=True)
+
+        except requests.exceptions.RequestException as err:
+            logger.error(f"Error de conexión en registro: {err}")
+            self.show_status("Error de conexión con el servidor API en Render.", is_error=True)
 
     def mostrar_dashboard(self):
-        """Transiciona de la vista de login a la vista del Dashboard de la bóveda."""
         self.destroy_login_ui()
-
         self.geometry("950x650")
         self.resizable(True, True)
         self.center_window()
 
         self.dashboard_frame = DashboardFrame(
             self,
-            usuario_id=self.usuario_id,
-            clave_derivada=self.clave_derivada,
-            usuario_nombre=self.usuario_nombre,
+            username=self.username,
+            master_password=self.master_password,
             on_logout=self.handle_logout
         )
         self.dashboard_frame.pack(fill="both", expand=True)
 
     def handle_logout(self):
-        """Cierra la sesión del usuario actual, limpia memoria y vuelve a la pantalla de login."""
-        # Limpiar portapapeles antes de salir por seguridad
         self.limpiar_portapapeles()
-
-        self.usuario_id = None
-        self.clave_derivada = None
-        self.usuario_nombre = None
+        self.username = None
+        self.master_password = None
 
         self.geometry("450x550")
         self.resizable(False, False)
@@ -1467,45 +1350,31 @@ class App(ctk.CTk):
         self.setup_login_ui()
         self.show_status("Sesión cerrada correctamente.", is_error=False)
 
-    # Lógica centralizada del portapapeles seguro usando pyperclip
     def copiar_al_portapapeles(self, texto: str):
-        """
-        Copia un texto al portapapeles del sistema usando pyperclip y programa su borrado automático a los 10s.
-        Si se llama sucesivamente, reinicia el temporizador de limpieza.
-        """
         import pyperclip
 
-        # Cancelar cualquier temporizador de borrado anterior activo
         if self._clipboard_timer:
             self.after_cancel(self._clipboard_timer)
             self._clipboard_timer = None
 
         try:
-            # Copiar usando la librería robusta multiplataforma pyperclip
             pyperclip.copy(texto)
             logger.info("Contraseña copiada al portapapeles.")
         except Exception as e:
             logger.error(f"Error al escribir en el portapapeles con pyperclip: {e}")
 
-        # Programar la limpieza automática a los 30 segundos (30,000 milisegundos)
         self._clipboard_timer = self.after(30000, lambda: self.limpiar_portapapeles(texto))
 
     def limpiar_portapapeles(self, texto_copiado: str = None):
-        """
-        Limpia el portapapeles del sistema por seguridad.
-        Si se pasa texto_copiado, solo lo limpia si el portapapeles sigue conteniendo esa contraseña exacta
-        para evitar sobreescribir datos nuevos copiados externamente por el usuario.
-        """
         import pyperclip
         try:
-            # Si es limpieza incondicional (logout) o si el portapapeles contiene el mismo valor copiado, procedemos
             if texto_copiado is None or pyperclip.paste() == texto_copiado:
                 pyperclip.copy("")
-                logger.info("Portapapeles efímero limpiado automáticamente por razones de seguridad.")
+                logger.info("Portapapeles efímero limpiado automáticamente.")
             else:
-                logger.info("El portapapeles fue modificado externamente por el usuario; se omitió la limpieza automática.")
+                logger.info("El portapapeles fue modificado externamente; se omitió la limpieza.")
         except Exception as e:
-            logger.error(f"Error al limpiar el portapapeles con pyperclip: {e}")
+            logger.error(f"Error al limpiar el portapapeles: {e}")
 
         self._clipboard_timer = None
 

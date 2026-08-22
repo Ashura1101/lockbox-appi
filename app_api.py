@@ -313,6 +313,47 @@ def get_categories():
 
 
 # ==========================================
+# RESTABLECER CONTRASEÑA
+# ==========================================
+@app.route('/api/recover', methods=['POST'])
+@limiter.limit("3 per minute")
+def recover_password():
+    """
+    Restablece la contraseña maestra de un usuario usando su clave de recuperación.
+    Recibe JSON: { "username": "...", "recovery_key": "...", "new_master_password": "..." }
+    """
+    data = request.get_json() or {}
+    username = data.get("username", "").strip()
+    recovery_key = data.get("recovery_key", "").strip()
+    new_master_password = data.get("new_master_password", "").strip()
+
+    if not username or not recovery_key or not new_master_password:
+        return jsonify({"error": "Todos los campos son obligatorios"}), 400
+
+    if len(new_master_password) < 8:
+        return jsonify({"error": "La nueva contraseña maestra debe tener al menos 8 caracteres"}), 400
+
+    with get_db_session() as session:
+        usuario = session.query(Usuario).filter_by(username=username).first()
+        if not usuario:
+            return jsonify({"error": "El usuario no existe"}), 404
+
+        if not usuario.recovery_key_hash:
+            return jsonify({"error": "El usuario no tiene una clave de recuperación configurada"}), 400
+
+        if not verificar_hash_maestro(recovery_key, usuario.recovery_key_hash):
+            return jsonify({"error": "La clave de recuperación es incorrecta"}), 401
+
+        nuevo_salt = generar_salt_derivacion()
+        nuevo_hash = generar_hash_maestro(new_master_password)
+
+        usuario.master_hash = nuevo_hash
+        usuario.salt_derivacion = nuevo_salt
+
+    return jsonify({"message": "Contraseña maestra restablecida con éxito"}), 200
+
+
+# ==========================================
 # MANEJADOR DE ERROR 429 — Rate Limit Superado
 # ==========================================
 @app.errorhandler(429)
