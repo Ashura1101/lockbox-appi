@@ -1,0 +1,4121 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+Lockbox_Extension/
+  manifest.json
+  popup.css
+  popup.html
+  popup.js
+.gitignore
+api.py
+app_api.py
+app_db.py
+app_gui.py
+lockbox_theme.json
+requirements.txt
+sanitize_db.py
+seguridad.py
+walkthrough.md
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="sanitize_db.py">
+import logging
+from app_db import get_db_session, Credencial, init_db
+from seguridad import normalize_domain
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("sanitize_db")
+
+
+def sanitize_existing_db_records():
+    """Recorre las credenciales guardadas y normaliza los nombres de sitios web."""
+    init_db()
+
+    with get_db_session() as session:
+        credentials = session.query(Credencial).all()
+        logger.info(f"Revisando {len(credentials)} credenciales en la base de datos...")
+        updated_count = 0
+
+        for cred in credentials:
+            normalized = normalize_domain(cred.sitio_web)
+            if cred.sitio_web != normalized:
+                logger.info(f"Normalizando ID {cred.id}: '{cred.sitio_web}' -> '{normalized}'")
+                cred.sitio_web = normalized
+                updated_count += 1
+
+        if updated_count > 0:
+            logger.info(f"Se normalizaron y guardaron {updated_count} registros en la base de datos.")
+        else:
+            logger.info("Todas las credenciales en la base de datos ya están normalizadas.")
+
+
+if __name__ == "__main__":
+    sanitize_existing_db_records()
+</file>
+
+<file path="Lockbox_Extension/manifest.json">
+{
+  "manifest_version": 3,
+  "name": "LOCKBOX",
+  "version": "1.0",
+  "description": "Extensión de Chrome para el Gestor de Contraseñas LOCKBOX",
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "clipboardWrite",
+    "storage",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8000/*",
+    "<all_urls>"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  }
+}
+</file>
+
+<file path=".gitignore">
+.env
+venv/
+__pycache__/
+build/
+dist/
+*.spec
+</file>
+
+<file path="api.py">
+from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+from app_db import SessionLocal, Credencial, Categoria, Usuario
+from seguridad import verificar_hash_maestro, derivar_clave_fernet, descifrar_contrasena
+
+app = FastAPI(title="LOCKBOX API")
+
+# Configurar middleware CORS para permitir peticiones desde la extensión de Chrome
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Permite todos los orígenes para desarrollo local
+    allow_credentials=True,
+    allow_methods=["*"],  # Permite todos los métodos HTTP
+    allow_headers=["*"],  # Permite todos los encabezados HTTP
+)
+
+# Dependencia para obtener la sesión de la base de datos
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+@app.get("/")
+def read_root():
+    return {"status": "Servidor LOCKBOX activo"}
+
+@app.get("/test-db")
+def test_db(db: Session = Depends(get_db)):
+    try:
+        # Consultamos las tablas para verificar la conexión
+        total_usuarios = db.query(Usuario).count()
+        total_credenciales = db.query(Credencial).count()
+        total_categorias = db.query(Categoria).count()
+        
+        return {
+            "status": "Conexión con PostgreSQL exitosa",
+            "db_stats": {
+                "usuarios_registrados": total_usuarios,
+                "credenciales_almacenadas": total_credenciales,
+                "categorias_disponibles": total_categorias
+            }
+        }
+    except Exception as e:
+        return {
+            "status": "Error al conectar con la base de datos",
+            "detail": str(e)
+        }
+
+@app.get("/api/buscar")
+def buscar_credenciales(
+    sitio: str = Query(..., description="Nombre o dominio del sitio web a buscar"),
+    username: str = Query(None, description="Nombre del usuario dueño de la bóveda (opcional para pruebas locales)"),
+    master_password: str = Query(None, description="Contraseña maestra necesaria para descifrar las contraseñas"),
+    db: Session = Depends(get_db)
+):
+    """
+    Busca credenciales por coincidencia parcial en el campo 'sitio_web'
+    y descifra las contraseñas antes de retornarlas.
+    """
+    # 1. Obtener el usuario dueño de la bóveda
+    if not username:
+        # Si no se proporciona usuario, intentamos tomar el primero registrado (útil para entorno local monousuario)
+        usuario = db.query(Usuario).first()
+        if not usuario:
+            raise HTTPException(status_code=404, detail="No se encontraron usuarios registrados en la base de datos.")
+        username = usuario.username
+    else:
+        usuario = db.query(Usuario).filter_by(username=username).first()
+        if not usuario:
+            raise HTTPException(status_code=404, detail=f"El usuario '{username}' no existe.")
+
+    # 2. Verificar que se haya enviado la contraseña maestra para realizar el descifrado
+    if not master_password:
+        raise HTTPException(
+            status_code=400, 
+            detail="Se requiere el parámetro 'master_password' para autenticar y descifrar los datos."
+        )
+
+    # 3. Validar la contraseña maestra
+    if not verificar_hash_maestro(master_password, usuario.master_hash):
+        raise HTTPException(status_code=401, detail="Contraseña maestra incorrecta.")
+
+    # 4. Derivar la clave de encriptación Fernet con el salt del usuario
+    try:
+        clave_derivada = derivar_clave_fernet(master_password, usuario.salt_derivacion)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al derivar la clave: {str(e)}")
+
+    # 5. Realizar la búsqueda de las credenciales con coincidencia parcial (case-insensitive)
+    credenciales = db.query(Credencial).filter(
+        Credencial.usuario_id == usuario.id,
+        Credencial.sitio_web.ilike(f"%{sitio}%")
+    ).all()
+
+    # 6. Descifrar y estructurar los resultados
+    resultados = []
+    for cred in credenciales:
+        try:
+            # Asegurar conversión de memoryview u otros tipos similares a bytes
+            datos_cifrados = bytes(cred.password_cifrada)
+            password_plana = descifrar_contrasena(datos_cifrados, clave_derivada)
+            
+            resultados.append({
+                "id": str(cred.id),
+                "sitio": cred.sitio_web,
+                "usuario": cred.login_user,
+                "password": password_plana
+            })
+        except Exception as e:
+            # Si falla la desencripción de algún registro individual (ej. datos corruptos)
+            resultados.append({
+                "id": str(cred.id),
+                "sitio": cred.sitio_web,
+                "usuario": cred.login_user,
+                "password": f"[Error al descifrar: {str(e)}]"
+            })
+
+    return resultados
+</file>
+
+<file path="lockbox_theme.json">
+{
+    "CTk": {
+        "fg_color": [
+            "#F1F5F9",
+            "#0B0F19"
+        ]
+    },
+    "CTkToplevel": {
+        "fg_color": [
+            "gray92",
+            "gray14"
+        ]
+    },
+    "CTkFrame": {
+        "corner_radius": 6,
+        "border_width": 1,
+        "fg_color": [
+            "#E2E8F0",
+            "#1E293B"
+        ],
+        "top_fg_color": [
+            "gray81",
+            "gray20"
+        ],
+        "border_color": [
+            "#CBD5E1",
+            "#334155"
+        ]
+    },
+    "CTkButton": {
+        "corner_radius": 8,
+        "border_width": 0,
+        "fg_color": [
+            "#6366F1",
+            "#6366F1"
+        ],
+        "hover_color": [
+            "#4F46E5",
+            "#4F46E5"
+        ],
+        "border_color": [
+            "#3E454A",
+            "#949A9F"
+        ],
+        "text_color": [
+            "#FFFFFF",
+            "#FFFFFF"
+        ],
+        "text_color_disabled": [
+            "gray74",
+            "gray60"
+        ]
+    },
+    "CTkLabel": {
+        "corner_radius": 0,
+        "border_width": 0,
+        "fg_color": "transparent",
+        "border_color": [
+            "#979DA2",
+            "#565B5E"
+        ],
+        "text_color": [
+            "#0F172A",
+            "#F8FAFC"
+        ]
+    },
+    "CTkEntry": {
+        "corner_radius": 6,
+        "border_width": 2,
+        "fg_color": [
+            "#FFFFFF",
+            "#0F172A"
+        ],
+        "border_color": [
+            "#CBD5E1",
+            "#334155"
+        ],
+        "text_color": [
+            "#0F172A",
+            "#F8FAFC"
+        ],
+        "placeholder_text_color": [
+            "#94A3B8",
+            "#64748B"
+        ]
+    },
+    "CTkCheckBox": {
+        "corner_radius": 6,
+        "border_width": 3,
+        "fg_color": [
+            "#3B8ED0",
+            "#1F6AA5"
+        ],
+        "border_color": [
+            "#3E454A",
+            "#949A9F"
+        ],
+        "hover_color": [
+            "#36719F",
+            "#144870"
+        ],
+        "checkmark_color": [
+            "#DCE4EE",
+            "gray90"
+        ],
+        "text_color": [
+            "gray10",
+            "#DCE4EE"
+        ],
+        "text_color_disabled": [
+            "gray60",
+            "gray45"
+        ]
+    },
+    "CTkSwitch": {
+        "corner_radius": 1000,
+        "border_width": 3,
+        "button_length": 0,
+        "fg_color": [
+            "#939BA2",
+            "#4A4D50"
+        ],
+        "progress_color": [
+            "#3B8ED0",
+            "#1F6AA5"
+        ],
+        "button_color": [
+            "gray36",
+            "#D5D9DE"
+        ],
+        "button_hover_color": [
+            "gray20",
+            "gray100"
+        ],
+        "text_color": [
+            "gray10",
+            "#DCE4EE"
+        ],
+        "text_color_disabled": [
+            "gray60",
+            "gray45"
+        ]
+    },
+    "CTkRadioButton": {
+        "corner_radius": 1000,
+        "border_width_checked": 6,
+        "border_width_unchecked": 3,
+        "fg_color": [
+            "#3B8ED0",
+            "#1F6AA5"
+        ],
+        "border_color": [
+            "#3E454A",
+            "#949A9F"
+        ],
+        "hover_color": [
+            "#36719F",
+            "#144870"
+        ],
+        "text_color": [
+            "gray10",
+            "#DCE4EE"
+        ],
+        "text_color_disabled": [
+            "gray60",
+            "gray45"
+        ]
+    },
+    "CTkProgressBar": {
+        "corner_radius": 1000,
+        "border_width": 0,
+        "fg_color": [
+            "#939BA2",
+            "#4A4D50"
+        ],
+        "progress_color": [
+            "#3B8ED0",
+            "#1F6AA5"
+        ],
+        "border_color": [
+            "gray",
+            "gray"
+        ]
+    },
+    "CTkSlider": {
+        "corner_radius": 1000,
+        "button_corner_radius": 1000,
+        "border_width": 6,
+        "button_length": 0,
+        "fg_color": [
+            "#939BA2",
+            "#4A4D50"
+        ],
+        "progress_color": [
+            "gray40",
+            "#AAB0B5"
+        ],
+        "button_color": [
+            "#3B8ED0",
+            "#1F6AA5"
+        ],
+        "button_hover_color": [
+            "#36719F",
+            "#144870"
+        ]
+    },
+    "CTkOptionMenu": {
+        "corner_radius": 6,
+        "fg_color": [
+            "#3B8ED0",
+            "#1F6AA5"
+        ],
+        "button_color": [
+            "#36719F",
+            "#144870"
+        ],
+        "button_hover_color": [
+            "#27577D",
+            "#203A4F"
+        ],
+        "text_color": [
+            "#DCE4EE",
+            "#DCE4EE"
+        ],
+        "text_color_disabled": [
+            "gray74",
+            "gray60"
+        ]
+    },
+    "CTkComboBox": {
+        "corner_radius": 6,
+        "border_width": 2,
+        "fg_color": [
+            "#F9F9FA",
+            "#343638"
+        ],
+        "border_color": [
+            "#979DA2",
+            "#565B5E"
+        ],
+        "button_color": [
+            "#979DA2",
+            "#565B5E"
+        ],
+        "button_hover_color": [
+            "#6E7174",
+            "#7A848D"
+        ],
+        "text_color": [
+            "gray10",
+            "#DCE4EE"
+        ],
+        "text_color_disabled": [
+            "gray50",
+            "gray45"
+        ]
+    },
+    "CTkScrollbar": {
+        "corner_radius": 1000,
+        "border_spacing": 4,
+        "fg_color": "transparent",
+        "button_color": [
+            "gray55",
+            "gray41"
+        ],
+        "button_hover_color": [
+            "gray40",
+            "gray53"
+        ]
+    },
+    "CTkSegmentedButton": {
+        "corner_radius": 6,
+        "border_width": 2,
+        "fg_color": [
+            "#979DA2",
+            "gray29"
+        ],
+        "selected_color": [
+            "#3B8ED0",
+            "#1F6AA5"
+        ],
+        "selected_hover_color": [
+            "#36719F",
+            "#144870"
+        ],
+        "unselected_color": [
+            "#979DA2",
+            "gray29"
+        ],
+        "unselected_hover_color": [
+            "gray70",
+            "gray41"
+        ],
+        "text_color": [
+            "#DCE4EE",
+            "#DCE4EE"
+        ],
+        "text_color_disabled": [
+            "gray74",
+            "gray60"
+        ]
+    },
+    "CTkTextbox": {
+        "corner_radius": 6,
+        "border_width": 0,
+        "fg_color": [
+            "#F9F9FA",
+            "#1D1E1E"
+        ],
+        "border_color": [
+            "#979DA2",
+            "#565B5E"
+        ],
+        "text_color": [
+            "gray10",
+            "#DCE4EE"
+        ],
+        "scrollbar_button_color": [
+            "gray55",
+            "gray41"
+        ],
+        "scrollbar_button_hover_color": [
+            "gray40",
+            "gray53"
+        ]
+    },
+    "CTkScrollableFrame": {
+        "label_fg_color": [
+            "gray78",
+            "gray23"
+        ]
+    },
+    "DropdownMenu": {
+        "fg_color": [
+            "gray90",
+            "gray20"
+        ],
+        "hover_color": [
+            "gray75",
+            "gray28"
+        ],
+        "text_color": [
+            "gray10",
+            "gray90"
+        ]
+    },
+    "CTkFont": {
+        "macOS": {
+            "family": "SF Display",
+            "size": 13,
+            "weight": "normal"
+        },
+        "Windows": {
+            "family": "Roboto",
+            "size": 13,
+            "weight": "normal"
+        },
+        "Linux": {
+            "family": "Roboto",
+            "size": 13,
+            "weight": "normal"
+        }
+    }
+}
+</file>
+
+<file path="walkthrough.md">
+# Visual Redesign Walkthrough
+
+We have successfully redesigned the LOCKBOX main dashboard window in `app_gui.py` to match Material Design aesthetics, incorporating the global theme defined in `lockbox_theme.json`.
+
+## Changes Made
+
+### 1. Global Theme Configuration & Key Error Resolution
+- Removed the local theme override `ctk.set_default_color_theme("blue")` to allow the global configuration in `lockbox_theme.json` to load styles automatically.
+- Fixed `KeyError` exceptions (specifically `KeyError: 'fg_color'` and `KeyError: 'CTkFont'`) on application startup. Because CustomTkinter expects a custom theme JSON file to provide all required default component keys once a widget class is overridden, we programmatically merged the user's custom definitions with the default `blue.json` file.
+- Ensured `fg_color` for `CTkLabel` in the JSON theme uses the single string `"transparent"` rather than `["transparent", "transparent"]` to satisfy Tkinter's canvas rendering options.
+
+### 2. Main Window Layout Restructuring
+- Restructured `DashboardFrame` from a stacked vertical layout into a modern **2-column Grid Layout**:
+  - **Column 0 (Sidebar/Barra Lateral)**: Fixed width of `200px` with background color `#0F172A`. Contains:
+    - The title **LOCKBOX** styled in bold and indigo (`#6366F1`) font.
+    - Navigation buttons **🔑 Mi Bóveda** (active styling) and **⚙️ Generador** (active, links to the password generator modal window).
+    - **Cerrar Sesión** button positioned cleanly at the bottom.
+  - **Column 1 (Panel de Contenido)**: Fills the remaining space with a transparent background.
+
+### 3. Styled Search Bar
+- Placed a full-width search bar with magnifying glass icon `🔍 Buscar sitio, usuario o categoría...` and height of `45` at the top of the content panel.
+
+### 4. Sub-header Controls
+- Below the search bar, added a sub-header containing the Category selection dropdown, the status message/notification label, and a prominent **+ Agregar Credencial** button on the right.
+- Fixed a Tkinter startup error by removing the invalid `sticky="center"` parameter from the `label_notificacion` `grid` configuration.
+
+### 5. Card-Based Credential List
+- Redesigned `crear_tarjeta_credencial` to render each credential inside a modern card frame with rounded corners (`corner_radius=10`) and border (`border_width=1`).
+- Custom color styling applied:
+  - Website title rendered larger in bright Celeste (`#38BDF8`).
+  - Username and password text displayed in subtle grey shades (`#94A3B8` / `#64748B`).
+- Grouped compact action buttons horizontally on the right side of the card:
+  - **Mostrar / Ocultar**: Toggles password visibility with a 15-second auto-hide timer. (Slate background: `#475569`)
+  - **Copiar Usuario**: Copies the username to the clipboard. (Teal background: `#0D9488`)
+  - **Copiar Pass**: Copies the password to the clipboard and triggers the 30-second security clear timer. (Green background: `#10B981`)
+  - **Editar**: Opens the credential edit modal. (Blue background: `#3B82F6`)
+  - **Eliminar**: Deletes the credential from the database after confirmation. (Red background: `#EF4444`)
+
+### 6. Edit Credential Password Generator
+- Integrated the inline password generator ("🎲 Generar" button) and character length slider directly into the **Editar Credencial** window (`EditarCredencialWindow`).
+- Expanded the edit window's vertical size to `400x560` to accommodate these widgets cleanly.
+- Implemented the slider motion updates and fill behaviors so it matches the creation window (`AgregarCredencialWindow`) experience.
+
+---
+
+## Verification Results
+
+### Theme & Launch Check
+We ran the application in the project virtual environment after fixing the theme keys:
+```powershell
+.\venv\Scripts\python app_gui.py
+```
+- **Result**: The database initialized successfully, the theme loaded without errors, the Tkinter main loop started, and the login window appeared as expected.
+</file>
+
+<file path="Lockbox_Extension/popup.css">
+/* Reset y variables base */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  width: 360px;
+  min-height: 520px;
+  background-color: #0b0f19;
+  color: #f8fafc;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  padding: 16px;
+}
+
+.app-container {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Header */
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.logo-title {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: #818cf8;
+}
+
+.badge-status {
+  background: rgba(99, 102, 241, 0.15);
+  color: #818cf8;
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* Navegación Pestañas */
+.tabs-nav {
+  display: flex;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 4px;
+  gap: 4px;
+}
+
+.tab-btn {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.tab-btn.active {
+  background: #6366f1;
+  color: #ffffff;
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+}
+
+/* Formulario e Inputs */
+.input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.input-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #cbd5e1;
+}
+
+.password-wrapper,
+.search-wrapper,
+.generator-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+input[type="text"],
+input[type="password"],
+.input-field {
+  width: 100%;
+  background: rgba(15, 23, 42, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: #ffffff;
+  font-size: 13px;
+  font-family: inherit;
+  transition: border-color 0.2s;
+}
+
+input[type="text"]:focus,
+input[type="password"]:focus,
+.input-field:focus {
+  outline: none;
+  border-color: #6366f1;
+}
+
+/* Iconos y Botones de Formulario */
+.icon-button {
+  position: absolute;
+  right: 10px;
+  background: none;
+  border: none;
+  color: #94a3b8;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.icon-eye {
+  width: 18px;
+  height: 18px;
+}
+
+.btn-primary {
+  width: 100%;
+  background: #6366f1;
+  color: #ffffff;
+  border: none;
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: background 0.2s, transform 0.1s;
+  margin-top: 6px;
+}
+
+.btn-primary:hover {
+  background: #4f46e5;
+}
+
+.btn-primary:active {
+  transform: scale(0.98);
+}
+
+.icon-search {
+  width: 16px;
+  height: 16px;
+}
+
+/* Generador */
+.separator {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+  margin: 16px 0;
+}
+
+.length-container {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  color: #94a3b8;
+  margin-bottom: 6px;
+}
+
+.length-container input[type="range"] {
+  accent-color: #6366f1;
+  cursor: pointer;
+}
+
+.generator-actions {
+  position: absolute;
+  right: 8px;
+  display: flex;
+  gap: 4px;
+}
+
+.icon-button-action {
+  background: rgba(255, 255, 255, 0.08);
+  border: none;
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: background 0.2s;
+}
+
+.icon-button-action:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+/* Botón Danger */
+.btn-danger {
+  width: 100%;
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-top: 8px;
+  transition: background 0.2s;
+}
+
+.btn-danger:hover {
+  background: rgba(239, 68, 68, 0.25);
+}
+
+/* Utilidades */
+.d-none {
+  display: none !important;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* Nuevas clases y mapeos de estructura */
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.logo {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: #818cf8;
+}
+
+.badge {
+  background: rgba(99, 102, 241, 0.15);
+  color: #818cf8;
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+}
+
+.tabs {
+  display: flex;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 4px;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.user-bar {
+  background: rgba(255, 255, 255, 0.05);
+  padding: 8px 12px;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  font-size: 0.9em;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.btn-icon {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1.1em;
+}
+
+.view h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: #818cf8;
+  text-align: center;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+</file>
+
+<file path="Lockbox_Extension/popup.html">
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Lockbox</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+
+<body>
+  <div class="container">
+    <!-- CABECERA -->
+    <header class="header">
+      <h1 class="logo">LOCKBOX</h1>
+      <div class="header-right">
+        <span id="api-status" class="badge">Nube</span>
+        <button id="btn-logout" class="btn-icon hidden" title="Cerrar sesión"
+          style="background: none; border: none; cursor: pointer; padding: 4px;">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#ff5555" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+            <polyline points="16 17 21 12 16 7"></polyline>
+            <line x1="21" y1="12" x2="9" y2="12"></line>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- VISTA 1: LOGIN -->
+    <div id="view-login" class="view">
+      <h2>Iniciar Sesión</h2>
+      <form id="form-login">
+        <div class="input-group">
+          <label>Usuario</label>
+          <input type="text" id="login-username" placeholder="Ej: yefer" required>
+        </div>
+        <div class="input-group">
+          <label>Contraseña Maestra</label>
+          <input type="password" id="login-password" placeholder="••••••••••••" required>
+        </div>
+        <button type="submit" id="btn-login-submit" class="btn-primary">Entrar</button>
+      </form>
+    </div>
+
+    <!-- VISTA 2: PANEL PRINCIPAL (Oculto al inicio) -->
+    <div id="view-main" class="view hidden">
+      <div class="user-bar">
+        <span>Usuario: <strong id="active-user-display"></strong></span>
+      </div>
+
+      <!-- PESTAÑAS (BUSCAR / AÑADIR) -->
+      <div class="tabs">
+        <button id="tab-search" class="tab-btn active">🔍 Buscar</button>
+        <button id="tab-add" class="tab-btn">➕ Añadir</button>
+      </div>
+
+      <!-- CONTENIDO BUSCAR -->
+      <div id="view-search" class="tab-content">
+        <div class="input-group">
+          <label>Buscar Sitio Web</label>
+          <input type="text" id="search-site" placeholder="youtube.com">
+        </div>
+        <button id="btn-search" class="btn-primary">Buscar Credenciales 🔍</button>
+        <div id="results-container" class="results-list"></div>
+      </div>
+
+      <!-- CONTENIDO AÑADIR -->
+      <form id="add-credential-form" class="tab-content hidden">
+        <div class="input-group">
+          <label>Sitio Web / Servicio</label>
+          <input type="text" id="add-site" placeholder="github.com" required>
+        </div>
+        <div class="input-group">
+          <label>Usuario / Email del sitio</label>
+          <input type="text" id="add-user" placeholder="mi_usuario" required>
+        </div>
+        <div class="input-group">
+          <label>Contraseña a Guardar</label>
+          <input type="password" id="add-pass" placeholder="••••••••" required>
+        </div>
+        <button type="submit" class="btn-primary">Guardar Credencial 💾</button>
+      </form>
+    </div>
+
+    <!-- MENSAJES DE ESTADO -->
+    <div id="status-message" class="status-msg hidden"></div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+
+</html>
+</file>
+
+<file path="Lockbox_Extension/popup.js">
+const API_URL = "https://lockbox-appi.onrender.com/api";
+
+document.addEventListener("DOMContentLoaded", async () => {
+  // Elementos de la interfaz
+  const viewLogin = document.getElementById("view-login");
+  const viewMain = document.getElementById("view-main");
+  const formLogin = document.getElementById("form-login");
+  const btnLogout = document.getElementById("btn-logout");
+  const activeUserDisplay = document.getElementById("active-user-display");
+  const statusMessage = document.getElementById("status-message");
+
+  // Pestañas
+  const tabSearch = document.getElementById("tab-search");
+  const tabAdd = document.getElementById("tab-add");
+  const viewSearch = document.getElementById("view-search");
+  const viewAdd = document.getElementById("add-credential-form");
+
+  // Inputs
+  const searchSiteInput = document.getElementById("search-site");
+  const btnSearch = document.getElementById("btn-search");
+  const resultsContainer = document.getElementById("results-container");
+
+  // Inputs Formulario Añadir
+  const addSiteInput = document.getElementById("add-site");
+  const addUserInput = document.getElementById("add-user");
+  const addPassInput = document.getElementById("add-pass");
+
+  // Estado del Servidor (Nube o Local)
+  const apiStatusBadge = document.getElementById("api-status");
+  if (apiStatusBadge) {
+    if (API_URL.includes("onrender.com")) {
+      apiStatusBadge.textContent = "Nube";
+      apiStatusBadge.style.background = "rgba(16, 185, 129, 0.15)";
+      apiStatusBadge.style.color = "#34d399";
+      apiStatusBadge.style.borderColor = "rgba(16, 185, 129, 0.3)";
+    } else {
+      apiStatusBadge.textContent = "Local";
+      apiStatusBadge.style.background = "rgba(99, 102, 241, 0.15)";
+      apiStatusBadge.style.color = "#818cf8";
+      apiStatusBadge.style.borderColor = "rgba(99, 102, 241, 0.3)";
+    }
+  }
+
+  // AUTO-DETECCIÓN DE PESTAÑA ACTIVA
+  if (typeof chrome !== "undefined" && chrome.tabs) {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs[0] && tabs[0].url) {
+        try {
+          const urlObj = new URL(tabs[0].url);
+          let domain = urlObj.hostname.replace(/^www\./, "");
+          if (domain && !domain.includes("chrome://") && !domain.includes("newtab")) {
+            searchSiteInput.value = domain;
+            if (addSiteInput) addSiteInput.value = domain;
+          }
+        } catch (e) {
+          console.log("No se pudo obtener el dominio:", e);
+        }
+      }
+    });
+  }
+
+  // 1. Comprobar si ya hay una sesión activa guardada
+  chrome.storage.local.get(["currentUser", "masterPassword"], (data) => {
+    if (data.currentUser && data.masterPassword) {
+      showMainView(data.currentUser);
+    } else {
+      showLoginView();
+    }
+  });
+
+  // 2. Evento del Login (Valida contra la API antes de guardar)
+  formLogin.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const username = document.getElementById("login-username").value.trim();
+    const masterPassword = document.getElementById("login-password").value;
+
+    if (!username || !masterPassword) return;
+
+    showStatus("Iniciando sesión...", "info");
+
+    try {
+      const response = await fetch(`${API_URL}/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, master_password: masterPassword })
+      });
+
+      const resData = await response.json();
+
+      if (response.ok) {
+        showStatus("", "hidden");
+        chrome.storage.local.set({ currentUser: username, masterPassword: masterPassword }, () => {
+          showMainView(username);
+        });
+      } else {
+        showStatus(resData.error || "Usuario o contraseña incorrectos", "error");
+      }
+    } catch (err) {
+      showStatus("Error al conectar con la API Python.", "error");
+    }
+  });
+
+  // 3. Evento de Cerrar Sesión
+  btnLogout.addEventListener("click", () => {
+    chrome.storage.local.remove(["currentUser", "masterPassword"], () => {
+      showLoginView();
+    });
+  });
+
+  // Cambiar entre pestañas
+  tabSearch.addEventListener("click", () => {
+    tabSearch.classList.add("active");
+    tabAdd.classList.remove("active");
+    viewSearch.classList.remove("hidden");
+    viewAdd.classList.add("hidden");
+  });
+
+  tabAdd.addEventListener("click", () => {
+    tabAdd.classList.add("active");
+    tabSearch.classList.remove("active");
+    viewAdd.classList.remove("hidden");
+    viewSearch.classList.add("hidden");
+  });
+
+  // 4. Buscar Credenciales usando el usuario activo
+  btnSearch.addEventListener("click", async () => {
+    const querySite = searchSiteInput.value.trim().toLowerCase();
+    
+    chrome.storage.local.get(["currentUser", "masterPassword"], async (data) => {
+      if (!data.currentUser) return showStatus("Por favor inicia sesión", "error");
+
+      showStatus("Consultando y descifrando...", "info");
+      resultsContainer.innerHTML = "";
+
+      try {
+        const payload = {
+          username: data.currentUser,
+          master_password: data.masterPassword
+        };
+        if (querySite) payload.query = querySite;
+
+        const res = await fetch(`${API_URL}/credentials`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+
+        // Siempre leer el JSON primero (sea error o éxito)
+        const result = await res.json();
+
+        // 🚨 Rate limit superado — mostrar mensaje personalizado de Flask
+        if (res.status === 429) {
+          showStatus(result.error || "Has superado el límite de intentos. Espera un momento.", "error");
+          return;
+        }
+
+        if (res.ok) {
+          showStatus("", "hidden");
+          let credenciales = result.credenciales || [];
+          if (querySite) {
+            credenciales = filterCredentialsForCurrentSite(credenciales, querySite);
+          }
+          renderResults(credenciales);
+        } else {
+          showStatus(result.error || "Error al obtener credenciales", "error");
+        }
+      } catch (err) {
+        showStatus("Error al conectar con la API Python.", "error");
+      }
+    });
+  });
+
+  // 5. Guardar nueva credencial
+  viewAdd.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    
+    chrome.storage.local.get(["currentUser", "masterPassword"], async (data) => {
+      if (!data.currentUser || !data.masterPassword) {
+        showStatus("Debes iniciar sesión primero.", "error");
+        return;
+      }
+
+      const sitioWeb = normalizeDomain(addSiteInput.value);
+      const loginUser = addUserInput.value.trim();
+      const password = addPassInput.value.trim();
+
+      showStatus("Cifrando y guardando...", "info");
+
+      try {
+        const response = await fetch(`${API_URL}/credentials/add`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: data.currentUser,
+            master_password: data.masterPassword,
+            sitio_web: sitioWeb,
+            login_user: loginUser,
+            password: password
+          })
+        });
+
+        const resData = await response.json();
+
+        if (response.ok) {
+          showStatus(`¡'${sitioWeb}' cifrado y guardado con éxito!`, "success");
+          viewAdd.reset();
+        } else {
+          showStatus(resData.error || "Error al guardar", "error");
+        }
+      } catch (err) {
+        showStatus("Error de conexión con el servidor.", "error");
+      }
+    });
+  });
+
+  /**
+   * Normaliza cualquier entrada de sitio web a un dominio o URL estándar.
+   * Ejemplos: "youtube" -> "youtube.com", "http://www.youtube.com" -> "youtube.com"
+   */
+  function normalizeDomain(input) {
+    if (!input || typeof input !== "string") return "";
+    let trimmed = input.trim().toLowerCase();
+
+    if (trimmed.startsWith("localhost") || trimmed.startsWith("127.0.0.1")) {
+      return trimmed.split("/")[0];
+    }
+
+    if (!trimmed.includes(".") && !trimmed.includes("://") && !trimmed.includes(":")) {
+      return `${trimmed}.com`;
+    }
+
+    try {
+      let urlToParse = trimmed;
+      if (!urlToParse.startsWith("http://") && !urlToParse.startsWith("https://")) {
+        urlToParse = "https://" + urlToParse;
+      }
+      const parsed = new URL(urlToParse);
+      return parsed.hostname.replace(/^www\./, "");
+    } catch (e) {
+      return trimmed.replace(/^www\./, "");
+    }
+  }
+
+  /**
+   * Extrae las variantes de un término/URL para realizar una búsqueda inclusiva.
+   * Ejemplo: "https://www.youtube.com/watch?v=..." -> { hostname: "youtube.com", domainBase: "youtube" }
+   */
+  function getSearchTermsFromUrl(urlString) {
+    try {
+      const urlObj = new URL(urlString);
+      let hostname = urlObj.hostname.toLowerCase().replace(/^www\./, "");
+      let domainBase = hostname.split(".")[0];
+      return { hostname, domainBase };
+    } catch (e) {
+      let clean = urlString.toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0];
+      let domainBase = clean.split(".")[0];
+      return { hostname: clean, domainBase };
+    }
+  }
+
+  /**
+   * Lógica de filtrado en el cliente/popup con coincidencia fuerte y por nombre base
+   */
+  function filterCredentialsForCurrentSite(allCredentials, currentUrlOrDomain) {
+    if (!currentUrlOrDomain) return allCredentials;
+
+    const { hostname, domainBase } = getSearchTermsFromUrl(currentUrlOrDomain);
+    const rawQuery = currentUrlOrDomain.toLowerCase().trim();
+
+    return allCredentials.filter(cred => {
+      if (!cred) return false;
+
+      const site = (cred.sitio_web || "").toLowerCase().trim();
+      const user = (cred.login_user || "").toLowerCase().trim();
+
+      // Coincidencia por usuario
+      if (user && user.includes(rawQuery)) return true;
+
+      if (!site) return false;
+
+      // Coincidencia 1: Exacta o parcial por FQDN ("youtube.com") o término directo
+      const matchesHostname = site.includes(hostname) || hostname.includes(site) || site.includes(rawQuery) || rawQuery.includes(site);
+
+      // Coincidencia 2: Coincidencia por nombre base ("youtube")
+      const matchesBase = (domainBase && domainBase.length > 2) && (site.includes(domainBase) || domainBase.includes(site));
+
+      return matchesHostname || matchesBase;
+    });
+  }
+
+  // Funciones Auxiliares
+  function showMainView(username) {
+    viewLogin.classList.add("hidden");
+    viewMain.classList.remove("hidden");
+    btnLogout.classList.remove("hidden");
+    activeUserDisplay.textContent = username;
+    btnSearch.click(); // Autoconsultar al iniciar sesión
+  }
+
+  function showLoginView() {
+    viewLogin.classList.remove("hidden");
+    viewMain.classList.add("hidden");
+    btnLogout.classList.add("hidden");
+    document.getElementById("login-password").value = "";
+    resultsContainer.innerHTML = "";
+  }
+
+  function showStatus(msg, type) {
+    if (type === "hidden") {
+      statusMessage.classList.add("hidden");
+      return;
+    }
+    statusMessage.textContent = msg;
+    statusMessage.className = `status-msg ${type}`;
+    statusMessage.classList.remove("hidden");
+
+    // Estilos dinámicos para mensajes de estado basados en el tipo
+    statusMessage.style.cssText = `
+      padding: 8px 12px; margin-top: 10px; border-radius: 6px; font-size: 12px; font-weight: 500; text-align: center;
+      background: ${type === "error" ? "rgba(239, 68, 68, 0.2)" : type === "success" ? "rgba(34, 197, 94, 0.2)" : "rgba(59, 130, 246, 0.2)"};
+      color: ${type === "error" ? "#fca5a5" : type === "success" ? "#86efac" : "#93c5fd"};
+      border: 1px solid ${type === "error" ? "rgba(239, 68, 68, 0.4)" : type === "success" ? "rgba(34, 197, 94, 0.4)" : "rgba(59, 130, 246, 0.4)"};
+    `;
+  }
+
+  function renderResults(lista) {
+    resultsContainer.innerHTML = "";
+    if (lista.length === 0) {
+      resultsContainer.innerHTML = `<div style="padding: 12px; text-align: center; color: #a0aec0; font-size: 13px;">No se encontraron credenciales.</div>`;
+      return;
+    }
+
+    lista.forEach(c => {
+      const card = document.createElement("div");
+      card.style.cssText = `
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 8px; padding: 12px; margin-top: 10px;
+      `;
+      card.innerHTML = `
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+          <div style="font-weight: 700; color: #6366f1; font-size: 14px;">🌐 ${escapeHTML(c.sitio_web)}</div>
+          <div>
+            <button type="button" class="btn-edit-item" style="background:none; border:none; cursor:pointer; font-size:14px;" title="Editar">✏️</button>
+            <button type="button" class="btn-delete-item" style="background:none; border:none; cursor:pointer; font-size:14px; margin-left:6px;" title="Eliminar">🗑️</button>
+          </div>
+        </div>
+        <div style="font-size: 12px; color: #cbd5e1; margin-bottom: 4px;">👤 <b>Usuario:</b> ${escapeHTML(c.login_user)}</div>
+        <div style="font-size: 12px; color: #cbd5e1; display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <span>🔑 <b>Password:</b> <code style="background: #0f172a; padding: 2px 6px; border-radius: 4px; color: #38bdf8;">${escapeHTML(c.password)}</code></span>
+          <button type="button" class="btn-copy-item" style="background:none; border:none; cursor:pointer;" title="Copiar contraseña">📋</button>
+        </div>
+        <button type="button" class="btn-autofill" style="width: 100%; background: #4f46e5; color: #fff; border: none; border-radius: 6px; padding: 6px; font-size: 12px; font-weight: 600; cursor: pointer;">
+          ⚡ Auto-llenar en el sitio
+        </button>
+      `;
+
+      // Evento: Copiar
+      card.querySelector(".btn-copy-item").addEventListener("click", () => {
+        navigator.clipboard.writeText(c.password);
+        showStatus("¡Contraseña copiada!", "success");
+        setTimeout(() => showStatus("", "hidden"), 2000);
+      });
+
+      // Evento: Auto-llenar
+      card.querySelector(".btn-autofill").addEventListener("click", () => {
+        autofillCredentials(c.login_user, c.password);
+        showStatus("¡Credenciales inyectadas!", "success");
+        setTimeout(() => showStatus("", "hidden"), 2000);
+      });
+
+      // Evento: Eliminar
+      card.querySelector(".btn-delete-item").addEventListener("click", async () => {
+        chrome.storage.local.get(["currentUser", "masterPassword"], async (data) => {
+          if (!data.currentUser || !data.masterPassword) return;
+          if (!confirm(`¿Estás seguro de borrar las credenciales de '${c.sitio_web}'?`)) return;
+
+          try {
+            const res = await fetch(`${API_URL}/credentials/delete`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                id: c.id,
+                username: data.currentUser,
+                master_password: data.masterPassword
+              })
+            });
+
+            if (res.ok) {
+              showStatus("Credencial eliminada correctamente", "success");
+              btnSearch.click(); // Recargar la lista
+            } else {
+              const resData = await res.json();
+              showStatus(resData.error || "Error al eliminar", "error");
+            }
+          } catch (e) {
+            showStatus("Error de conexión al eliminar", "error");
+          }
+        });
+      });
+
+      // Evento: Editar
+      card.querySelector(".btn-edit-item").addEventListener("click", async () => {
+        const nuevoSitio = prompt("Editar sitio web:", c.sitio_web);
+        if (nuevoSitio === null) return;
+        const sitioNormalizado = normalizeDomain(nuevoSitio);
+
+        const nuevoUsuario = prompt("Editar usuario/email:", c.login_user);
+        if (nuevoUsuario === null) return;
+
+        const nuevaPassword = prompt("Editar contraseña (déjalo igual si no quieres cambiarla):", c.password);
+        if (nuevaPassword === null) return;
+
+        chrome.storage.local.get(["currentUser", "masterPassword"], async (data) => {
+          if (!data.currentUser || !data.masterPassword) return;
+
+          try {
+            const res = await fetch(`${API_URL}/credentials/update`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                id: c.id,
+                username: data.currentUser,
+                master_password: data.masterPassword,
+                sitio_web: sitioNormalizado,
+                login_user: nuevoUsuario,
+                password: nuevaPassword
+              })
+            });
+
+            if (res.ok) {
+              showStatus("Credencial actualizada con éxito", "success");
+              btnSearch.click(); // Recargar la lista
+            } else {
+              const resData = await res.json();
+              showStatus(resData.error || "Error al actualizar", "error");
+            }
+          } catch (e) {
+            showStatus("Error de conexión al actualizar", "error");
+          }
+        });
+      });
+
+      resultsContainer.appendChild(card);
+    });
+  }
+
+  function escapeHTML(str) { return str.replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag)); }
+});
+
+// ==========================================
+// FUNCIÓN INYECTORA (Scripting)
+// ==========================================
+async function autofillCredentials(user, password) {
+  if (typeof chrome === "undefined" || !chrome.tabs) return;
+
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab || !tab.id) return;
+
+  chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: (userInput, passwordInput) => {
+      const passField = document.querySelector('input[type="password"]');
+      const userField = document.querySelector('input[type="text"], input[type="email"], input[name*="user"], input[name*="email"], input[name*="login"]');
+
+      if (userField && userInput) {
+        userField.value = userInput;
+        userField.dispatchEvent(new Event('input', { bubbles: true }));
+        userField.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+
+      if (passField && passwordInput) {
+        passField.value = passwordInput;
+        passField.dispatchEvent(new Event('input', { bubbles: true }));
+        passField.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    },
+    args: [user, password]
+  });
+}
+</file>
+
+<file path="app_db.py">
+import os
+import uuid
+import logging
+from datetime import datetime
+from contextlib import contextmanager
+from typing import Generator
+
+from dotenv import load_dotenv
+from sqlalchemy import (
+    create_engine,
+    ForeignKey,
+    String,
+    LargeBinary,
+    DateTime,
+    Integer,
+    func
+)
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import (
+    DeclarativeBase,
+    Mapped,
+    mapped_column,
+    relationship,
+    sessionmaker,
+    Session
+)
+from sqlalchemy.exc import SQLAlchemyError
+
+# Configuración del sistema de logging para trazabilidad y depuración en producción
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+)
+logger = logging.getLogger("app_db")
+
+# Cargar las variables de entorno desde el archivo .env si existe
+load_dotenv()
+
+# Cargar la URL de conexión directa desde el archivo .env si existe (p. ej. Supabase en la nube)
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    # Si no existe DATABASE_URL, usamos los valores individuales locales
+    DB_USER = os.getenv("DB_USER", "postgres")
+    DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+    DB_HOST = os.getenv("DB_HOST", "localhost")
+    DB_PORT = os.getenv("DB_PORT", "5432")
+    DB_NAME = os.getenv("DB_NAME", "password_manager")
+    DATABASE_URL = f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+else:
+    # Ajuste de compatibilidad para SQLAlchemy (asegura el driver psycopg2)
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg2://", 1)
+    elif DATABASE_URL.startswith("postgresql://") and not DATABASE_URL.startswith("postgresql+psycopg2://"):
+        DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
+
+try:
+    # Creación del motor de SQLAlchemy con pool de conexiones configurado
+    engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,      # Verifica la validez de la conexión antes de usarla
+        pool_recycle=3600,       # Recicla conexiones después de una hora
+        echo=False               # Establecer en True para depuración de consultas SQL
+    )
+    # Fábrica de sesiones configurada para no hacer commit ni autoflush automático
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+except Exception as e:
+    logger.critical(f"Error al inicializar el motor de la base de datos: {e}")
+    raise
+
+# Clase base declarativa (SQLAlchemy 2.0 Style)
+class Base(DeclarativeBase):
+    pass
+
+
+class Usuario(Base):
+    """
+    Modelo que representa la tabla de Usuarios.
+    Almacena las credenciales maestras y la identidad única de cada usuario local.
+    """
+    __tablename__ = "usuarios"
+
+    # UUID nativo autogenerado para seguridad de identificadores expuestos
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        index=True
+    )
+    username: Mapped[str] = mapped_column(
+        String(150),
+        unique=True,
+        nullable=False,
+        index=True
+    )
+    # Almacena el hash derivado de la contraseña maestra (usando bcrypt)
+    master_hash: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False
+    )
+    # Salt aleatorio de 16 bytes único por usuario para derivar la clave de encriptación simétrica Fernet
+    salt_derivacion: Mapped[bytes] = mapped_column(
+        LargeBinary,
+        nullable=False
+    )
+    # Almacena el hash de la clave de recuperación
+    recovery_key_hash: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True
+    )
+
+    # Relación uno-a-muchos con las credenciales del usuario
+    credenciales: Mapped[list["Credencial"]] = relationship(
+        "Credencial",
+        back_populates="usuario",
+        cascade="all, delete-orphan"  # Borrado en cascada al eliminar el usuario
+    )
+
+    def __repr__(self) -> str:
+        return f"<Usuario(username={self.username})>"
+
+
+class Categoria(Base):
+    """
+    Modelo que representa la tabla de Categorías para clasificar las credenciales.
+    Por ejemplo: 'Redes Sociales', 'Bancos', 'Trabajo'.
+    """
+    __tablename__ = "categorias"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True
+    )
+    nombre: Mapped[str] = mapped_column(
+        String(100),
+        unique=True,
+        nullable=False
+    )
+
+    # Relación uno-a-muchos con las credenciales asociadas a esta categoría
+    credenciales: Mapped[list["Credencial"]] = relationship(
+        "Credencial",
+        back_populates="categoria"
+    )
+
+    def __repr__(self) -> str:
+        return f"<Categoria(nombre={self.nombre})>"
+
+
+class Credencial(Base):
+    """
+    Modelo que representa la tabla de Credenciales.
+    Almacena la información de inicio de sesión cifrada de cada sitio o aplicación.
+    """
+    __tablename__ = "credenciales"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        index=True
+    )
+    # Llave foránea que asocia la credencial a un usuario específico
+    usuario_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("usuarios.id", ondelete="CASCADE"),
+        nullable=False
+    )
+    # Llave foránea opcional que asocia la credencial a una categoría
+    categoria_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("categorias.id", ondelete="SET NULL"),
+        nullable=True
+    )
+    
+    sitio_web: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False
+    )
+    login_user: Mapped[str] = mapped_column(
+        String(150),
+        nullable=False
+    )
+    # Almacenamiento en formato bytea (binario) para almacenar la contraseña cifrada
+    password_cifrada: Mapped[bytes] = mapped_column(
+        LargeBinary,
+        nullable=False
+    )
+    # Marca de tiempo de la última modificación
+    fecha_actualizacion: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=func.now(),
+        onupdate=func.now(),
+        nullable=False
+    )
+
+    # Relaciones SQLAlchemy para navegación entre objetos
+    usuario: Mapped["Usuario"] = relationship(
+        "Usuario",
+        back_populates="credenciales"
+    )
+    categoria: Mapped["Categoria | None"] = relationship(
+        "Categoria",
+        back_populates="credenciales"
+    )
+
+    def __repr__(self) -> str:
+        return f"<Credencial(sitio_web={self.sitio_web}, login_user={self.login_user})>"
+
+
+@contextmanager
+def get_db_session() -> Generator[Session, None, None]:
+    """
+    Administrador de contexto (Context Manager) para gestionar las sesiones de la BD.
+    Garantiza que la sesión se cierre correctamente y realiza rollback en caso de error.
+    
+    Yields:
+        Session: Sesión activa de SQLAlchemy.
+    """
+    session = SessionLocal()
+    try:
+        yield session
+        session.commit()
+    except SQLAlchemyError as e:
+        session.rollback()
+        logger.error(f"Error en la transacción de base de datos. Se ejecutó Rollback: {e}")
+        raise
+    finally:
+        session.close()
+
+
+def poblar_categorias_defecto(session: Session):
+    """Puebla la base de datos con las categorías por defecto si estas no existen."""
+    categorias_defecto = ["Trabajo", "Redes Sociales", "Bancos", "Juegos", "Otros"]
+    for nombre in categorias_defecto:
+        existe = session.query(Categoria).filter_by(nombre=nombre).first()
+        if not existe:
+            nueva_cat = Categoria(nombre=nombre)
+            session.add(nueva_cat)
+
+
+def init_db() -> bool:
+    """
+    Inicializa la base de datos creando las tablas definidas si no existen.
+    Puebla las categorías por defecto en una transacción segura.
+    
+    Returns:
+        bool: True si la inicialización fue exitosa, False en caso contrario.
+    """
+    logger.info("Iniciando creación de tablas en la base de datos...")
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("Tablas inicializadas correctamente o ya existentes.")
+        
+        # Asegurar que la columna recovery_key_hash exista (en caso de que la tabla ya exista de antes)
+        from sqlalchemy import text
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS recovery_key_hash VARCHAR(255);"))
+            logger.info("Columna 'recovery_key_hash' verificada/creada con éxito.")
+        except Exception as e:
+            logger.warning(f"No se pudo asegurar la columna 'recovery_key_hash' mediante ALTER TABLE (puede no ser compatible o ya existir): {e}")
+
+        # Poblar categorías por defecto
+        with SessionLocal() as session:
+            try:
+                poblar_categorias_defecto(session)
+                session.commit()
+                logger.info("Categorías por defecto verificadas/pobladas con éxito.")
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Error al poblar categorías por defecto: {e}")
+                
+        return True
+    except SQLAlchemyError as e:
+        logger.error(f"Error crítico al crear las tablas en la base de datos: {e}")
+        return False
+
+
+def restablecer_password(username: str, clave_recuperacion: str, nueva_password_maestra: str):
+    """
+    Restablece la contraseña maestra de un usuario utilizando su clave de recuperación.
+    """
+    from seguridad import generar_hash_maestro, generar_salt_derivacion, verificar_hash_maestro
+    
+    try:
+        with get_db_session() as session:
+            # 1. Buscar al usuario
+            usuario = session.query(Usuario).filter(Usuario.username == username).first()
+            if not usuario:
+                return False, "El usuario no existe."
+
+            # 2. Verificar que la clave de recuperación sea correcta
+            if not usuario.recovery_key_hash:
+                return False, "El usuario no tiene una clave de recuperación configurada."
+                
+            if not verificar_hash_maestro(clave_recuperacion, usuario.recovery_key_hash):
+                return False, "La Clave de Recuperación es incorrecta."
+
+            # 3. Si es correcta, generar nuevo salt y hash para la NUEVA contraseña maestra
+            nuevo_salt = generar_salt_derivacion()
+            nuevo_hash = generar_hash_maestro(nueva_password_maestra)
+
+            usuario.master_hash = nuevo_hash
+            usuario.salt_derivacion = nuevo_salt
+            
+            return True, "Contraseña actualizada con éxito."
+
+    except Exception as e:
+        logger.error(f"Error al restablecer contraseña: {e}")
+        return False, f"Error en la base de datos: {str(e)}"
+
+
+if __name__ == "__main__":
+    from seguridad import (
+        generar_hash_maestro,
+        verificar_hash_maestro,
+        generar_salt_derivacion,
+        derivar_clave_fernet,
+        cifrar_contrasena,
+        descifrar_contrasena
+    )
+
+    print("=== Probando Conexión e Inicialización de la Base de Datos ===")
+    
+    try:
+        with engine.connect() as connection:
+            print(" Conexión exitosa a la base de datos PostgreSQL.")
+            
+            # Proceder a inicializar las tablas
+            db_initialized = init_db()
+            if not db_initialized:
+                print(" No se pudieron inicializar las tablas. Revisa el log de errores.")
+                exit(1)
+            
+            print(" Estructura de tablas inicializada exitosamente.")
+            
+    except Exception as err:
+        print(" Error al conectar con la base de datos.")
+        print(f"Detalle del error: {err}")
+        print("\nConsejo: Asegúrate de configurar la variable DATABASE_URL en tu archivo .env con el enlace de Supabase.")
+        exit(1)
+
+    print("\n=== Iniciando Demostración del Flujo de Seguridad ===")
+    
+    # 1. Definir datos de prueba del usuario
+    TEST_USER = "usuario_demo"
+    TEST_MASTER_PASS = "MiPasswordMaestraSegura123!"
+    
+    with get_db_session() as session:
+        # Limpieza previa para poder ejecutar el script múltiples veces sin errores de clave única
+        existing_user = session.query(Usuario).filter_by(username=TEST_USER).first()
+        if existing_user:
+            print(f" Limpiando datos previos del usuario de prueba '{TEST_USER}'...")
+            session.delete(existing_user)
+            session.flush()
+        
+        # 2. Registrar el nuevo usuario
+        print(f" Registrando usuario de prueba: '{TEST_USER}'...")
+        # Generar hash de la contraseña maestra y salt para la derivación de clave
+        hash_maestro = generar_hash_maestro(TEST_MASTER_PASS)
+        salt_usuario = generar_salt_derivacion()
+        
+        nuevo_usuario = Usuario(
+            username=TEST_USER,
+            master_hash=hash_maestro,
+            salt_derivacion=salt_usuario
+        )
+        session.add(nuevo_usuario)
+        session.flush()  # Para obtener el ID generado del usuario
+        
+        print(" Usuario registrado con éxito en la base de datos.")
+        print(f"   -> ID del Usuario (UUID): {nuevo_usuario.id}")
+        print(f"   -> Salt Derivación (Hex): {nuevo_usuario.salt_derivacion.hex()}")
+        print(f"   -> Hash Maestro: {nuevo_usuario.master_hash}")
+
+    # 3. Simular el login y verificar la contraseña maestra
+    print("\n Simulando Login de Usuario...")
+    contrasena_ingresada = "MiPasswordMaestraSegura123!" # Cambiar para probar error
+    
+    with get_db_session() as session:
+        usuario_db = session.query(Usuario).filter_by(username=TEST_USER).first()
+        if not usuario_db:
+            print(" Error: Usuario no encontrado.")
+            exit(1)
+            
+        credenciales_correctas = verificar_hash_maestro(contrasena_ingresada, usuario_db.master_hash)
+        if not credenciales_correctas:
+            print(" Error: Contraseña maestra incorrecta.")
+            exit(1)
+            
+        print(" ¡Login Exitoso! Contraseña maestra verificada con bcrypt.")
+        
+        # 4. Derivar clave de cifrado simétrico usando la contraseña ingresada y el salt almacenado
+        print(" Derivando clave de cifrado simétrico mediante PBKDF2...")
+        clave_cifrado = derivar_clave_fernet(contrasena_ingresada, usuario_db.salt_derivacion)
+        print(f"   -> Clave Fernet Derivada (Base64): {clave_cifrado.decode('utf-8')[:15]}...")
+
+        # 5. Cifrar una contraseña de servicio y guardarla
+        print("\n Cifrando y guardando credencial de prueba...")
+        SITIO = "https://github.com"
+        LOGIN = "desarrollador_senior"
+        PASS_PLANA = "MiTokenUltraSecretoGithub2026!"
+        
+        pass_encriptada = cifrar_contrasena(PASS_PLANA, clave_cifrado)
+        
+        nueva_credencial = Credencial(
+            usuario_id=usuario_db.id,
+            sitio_web=SITIO,
+            login_user=LOGIN,
+            password_cifrada=pass_encriptada
+        )
+        session.add(nueva_credencial)
+        session.flush()
+        
+        print(f" Credencial de prueba guardada para '{SITIO}':")
+        print(f"   -> ID Credencial: {nueva_credencial.id}")
+        print(f"   -> Contraseña Cifrada (Bytes en BD): {nueva_credencial.password_cifrada[:20]}...")
+
+    # 6. Recuperar la credencial de la BD y descifrarla
+    print("\n Recuperando credencial de la base de datos y descifrando...")
+    with get_db_session() as session:
+        # Obtener el usuario de nuevo (simula una nueva consulta en sesión limpia)
+        usuario_db = session.query(Usuario).filter_by(username=TEST_USER).first()
+        
+        # Volver a derivar la clave (usando la contraseña maestra ingresada anteriormente)
+        clave_cifrado = derivar_clave_fernet(contrasena_ingresada, usuario_db.salt_derivacion)
+        
+        # Obtener las credenciales asociadas al usuario
+        credenciales_usuario = usuario_db.credenciales
+        for cred in credenciales_usuario:
+            decrypted_pass = descifrar_contrasena(cred.password_cifrada, clave_cifrado)
+            print(f" Credencial encontrada:")
+            print(f"   -> Sitio: {cred.sitio_web}")
+            print(f"   -> Login: {cred.login_user}")
+            print(f"   -> Contraseña Cifrada (En BD): {cred.password_cifrada[:20]}...")
+            print(f"   -> Contraseña Descifrada: {decrypted_pass}")
+            
+            # Verificación lógica
+            if decrypted_pass == PASS_PLANA:
+                print(" ¡Prueba superada con éxito! La contraseña coincide con la original.")
+            else:
+                print(" Error: Las contraseñas no coinciden.")
+</file>
+
+<file path="requirements.txt">
+altgraph==0.17.5
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anyio==4.14.2
+bcrypt==5.0.0
+blinker==1.9.0
+cffi==2.1.0
+click==8.4.2
+colorama==0.4.6
+cryptography==49.0.0
+customtkinter==6.0.0
+darkdetect==0.8.0
+fastapi==0.139.0
+Flask==3.1.3
+flask-cors==6.0.5
+greenlet==3.5.3
+gunicorn==26.0.0
+h11==0.16.0
+idna==3.18
+itsdangerous==2.2.0
+Jinja2==3.1.6
+keyboard==0.13.5
+MarkupSafe==3.0.3
+MouseInfo==0.1.3
+packaging==26.2
+pefile==2024.8.26
+pillow==12.3.0
+psycopg2-binary==2.9.12
+PyAutoGUI==0.9.54
+pycparser==3.0
+pydantic==2.13.4
+pydantic_core==2.46.4
+PyGetWindow==0.0.9
+pyinstaller==6.21.0
+pyinstaller-hooks-contrib==2026.6
+PyMsgBox==2.0.1
+pyperclip==1.11.0
+PyRect==0.2.0
+PyScreeze==1.0.1
+python-dotenv==1.2.2
+pytweening==1.2.0
+pywin32-ctypes==0.2.3
+SQLAlchemy==2.0.51
+starlette==1.3.1
+typing-inspection==0.4.2
+typing_extensions==4.16.0
+uvicorn==0.51.0
+Werkzeug==3.1.8
+Flask-Limiter==3.5.0
+</file>
+
+<file path="seguridad.py">
+import os
+import base64
+import bcrypt
+import logging
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+logger = logging.getLogger("seguridad")
+
+def generar_hash_maestro(password_maestra: str) -> str:
+    """
+    Genera un hash seguro y salado para la contraseña maestra utilizando bcrypt.
+    
+    Args:
+        password_maestra: Contraseña maestra ingresada por el usuario.
+        
+    Returns:
+        str: El hash generado codificado en UTF-8 para su almacenamiento en BD.
+    """
+    # bcrypt requiere la contraseña en bytes
+    password_bytes = password_maestra.encode('utf-8')
+    
+    # Generar un salt único y calcular el hash
+    # bcrypt incluye el salt dentro del hash resultante de manera estándar
+    salt = bcrypt.gensalt(rounds=12)
+    hash_bytes = bcrypt.hashpw(password_bytes, salt)
+    
+    return hash_bytes.decode('utf-8')
+
+
+def verificar_hash_maestro(password_maestra: str, hash_guardado: str) -> bool:
+    """
+    Verifica si la contraseña maestra coincide con el hash almacenado utilizando bcrypt.
+    
+    Args:
+        password_maestra: Contraseña maestra a verificar.
+        hash_guardado: Hash obtenido desde la base de datos.
+        
+    Returns:
+        bool: True si la contraseña es correcta, False de lo contrario.
+    """
+    password_bytes = password_maestra.encode('utf-8')
+    hash_bytes = hash_guardado.encode('utf-8')
+    
+    # bcrypt.checkpw verifica el hash de manera segura contra ataques de temporización
+    return bcrypt.checkpw(password_bytes, hash_bytes)
+
+
+def generar_salt_derivacion() -> bytes:
+    """
+    Genera un salt criptográficamente seguro de 16 bytes para la derivación de clave.
+    
+    Returns:
+        bytes: Salt de 16 bytes.
+    """
+    return os.urandom(16)
+
+
+def derivar_clave_fernet(password_maestra: str, salt: bytes) -> bytes:
+    """
+    Deriva una clave de cifrado simétrico compatible con Fernet a partir de la 
+    contraseña maestra del usuario y un salt aleatorio usando PBKDF2-HMAC-SHA256.
+    
+    Args:
+        password_maestra: Contraseña maestra del usuario.
+        salt: Salt aleatorio de 16 bytes específico del usuario.
+        
+    Returns:
+        bytes: Clave derivada codificada en base64 url-safe (32 bytes decodificados).
+    """
+    # Configuración de PBKDF2 según estándares OWASP
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=600000,  # Alta carga computacional para dificultar ataques de fuerza bruta
+    )
+    
+    # Derivar la clave simétrica cruda
+    clave_cruda = kdf.derive(password_maestra.encode('utf-8'))
+    
+    # Fernet requiere que la clave esté codificada en Base64 URL-safe
+    return base64.urlsafe_b64encode(clave_cruda)
+
+
+def cifrar_contrasena(password_plana: str, clave_derivada: bytes) -> bytes:
+    """
+    Cifra una contraseña en texto plano utilizando la clave derivada compatible con Fernet.
+    
+    Args:
+        password_plana: Contraseña en texto plano a cifrar.
+        clave_derivada: Clave Fernet derivada (Base64 URL-safe).
+        
+    Returns:
+        bytes: Token Fernet cifrado (bytes).
+    """
+    f = Fernet(clave_derivada)
+    return f.encrypt(password_plana.encode('utf-8'))
+
+
+def descifrar_contrasena(datos_cifrados: bytes, clave_derivada: bytes) -> str:
+    """
+    Descifra una contraseña cifrada con un token Fernet usando la clave derivada.
+    
+    Args:
+        datos_cifrados: Token Fernet cifrado en bytes o memoryview de BD.
+        clave_derivada: Clave Fernet derivada (Base64 URL-safe).
+        
+    Returns:
+        str: Contraseña descifrada en texto plano (UTF-8).
+    """
+    # Asegurar conversión de memoryview u otros tipos similares devueltos por DB
+    datos_bytes = bytes(datos_cifrados)
+    
+    f = Fernet(clave_derivada)
+    datos_descifrados = f.decrypt(datos_bytes)
+    return datos_descifrados.decode('utf-8')
+
+
+
+def generar_contrasena_segura(longitud: int = 16) -> str:
+    """
+    Genera una contraseña aleatoria criptográficamente segura usando el módulo secrets.
+    Garantiza que incluya al menos una mayúscula, una minúscula, un número y un símbolo.
+    
+    Args:
+        longitud: Longitud total de la contraseña (por defecto 16).
+        
+    Returns:
+        str: Contraseña generada.
+    """
+    import secrets
+    import string
+
+    if longitud < 6:
+        longitud = 6  # Evitar longitudes inseguras o que no permitan contener todos los sets
+
+    # Definición de conjuntos de caracteres
+    minusculas = string.ascii_lowercase
+    mayusculas = string.ascii_uppercase
+    digitos = string.digits
+    # Símbolos especiales estándar y seguros
+    simbolos = "!@#$%^&*()-_=+[]{}|;:,.<>?"
+
+    # Garantizar la presencia de al menos un carácter de cada tipo
+    caracteres_obligatorios = [
+        secrets.choice(minusculas),
+        secrets.choice(mayusculas),
+        secrets.choice(digitos),
+        secrets.choice(simbolos)
+    ]
+
+    # Completar la longitud requerida con una mezcla aleatoria de todos los conjuntos
+    todos_caracteres = minusculas + mayusculas + digitos + simbolos
+    caracteres_restantes = [secrets.choice(todos_caracteres) for _ in range(longitud - len(caracteres_obligatorios))]
+
+    password_lista = caracteres_obligatorios + caracteres_restantes
+
+    # Mezclar la lista de forma criptográficamente segura (usando ordenación por peso aleatorio de secrets)
+    # secrets no posee un método shuffle directo
+    password_mezclada = sorted(password_lista, key=lambda x: secrets.randbits(32))
+
+    return "".join(password_mezclada)
+
+
+def generar_clave_recuperacion() -> str:
+    """
+    Genera una clave de recuperación aleatoria fácil de anotar.
+    Ejemplo: LOCK-A1B2-C3D4
+    """
+    import secrets
+    bloque1 = secrets.token_hex(2).upper()
+    bloque2 = secrets.token_hex(2).upper()
+    return f"LOCK-{bloque1}-{bloque2}"
+
+
+def normalize_domain(input_string: str) -> str:
+    """
+    Normaliza entradas de sitios web a un dominio estándar.
+    Ej: 'youtube' -> 'youtube.com', 'https://www.facebook.com/login' -> 'facebook.com'
+    """
+    from urllib.parse import urlparse
+
+    if not input_string:
+        return ""
+
+    cleaned = input_string.strip().lower()
+
+    if cleaned.startswith("localhost") or cleaned.startswith("127.0.0.1"):
+        return cleaned.split("/")[0]
+
+    # 1. Si es un nombre plano sin puntos, protocolo ni puerto (ej: 'youtube')
+    if "." not in cleaned and "://" not in cleaned and ":" not in cleaned:
+        return f"{cleaned}.com"
+
+    # 2. Si no tiene protocolo, agregarlo temporalmente para parsear correctamente
+    if not cleaned.startswith("http://") and not cleaned.startswith("https://"):
+        cleaned = "https://" + cleaned
+
+    try:
+        parsed = urlparse(cleaned)
+        domain = parsed.netloc or parsed.path
+        # Remover puerto si existe (ej. localhost:8080) y el prefijo www.
+        domain = domain.split(":")[0]
+        if domain.startswith("www."):
+            domain = domain[4:]
+        return domain
+    except Exception:
+        return input_string.strip().lower()
+</file>
+
+<file path="app_gui.py">
+import logging
+import tkinter as tk
+from tkinter import messagebox
+import customtkinter as ctk
+from typing import Callable
+import requests
+
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("lockbox_theme.json")
+
+from seguridad import generar_contrasena_segura, normalize_domain
+
+# URL de la API desplegada en Render
+API_BASE_URL = "https://lockbox-appi.onrender.com/api"
+
+# Configuración del logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+)
+logger = logging.getLogger("app_gui")
+
+
+def obtener_categorias_api():
+    """Consulta la API en Render para obtener las categorías disponibles."""
+    try:
+        response = requests.get(f"{API_BASE_URL}/categories", timeout=10)
+        if response.status_code == 200:
+            return response.json().get("categories", [])
+        return []
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error al conectar con la API para categorías: {e}")
+        return []
+
+
+class AgregarCredencialWindow(ctk.CTkToplevel):
+    """
+    Ventana emergente (modal) para agregar una nueva credencial vía la API.
+    """
+    def __init__(self, parent: ctk.CTkFrame, username: str, master_password: str, on_save_callback: Callable[[], None]):
+        super().__init__(parent)
+        self.username = username
+        self.master_password = master_password
+        self.on_save_callback = on_save_callback
+
+        # Configuración de ventana
+        self.title("Agregar Nueva Credencial")
+        self.geometry("440x590")
+        self.resizable(False, False)
+        self.configure(fg_color="#0B0F19")
+
+        # Comportamiento modal
+        self.transient(parent)
+        self.grab_set()
+        self.focus_force()
+        self.center_toplevel(parent)
+
+        # Encabezado
+        self.label_titulo = ctk.CTkLabel(
+            self,
+            text="Nueva Credencial",
+            font=ctk.CTkFont(family="Helvetica", size=20, weight="bold"),
+            text_color="#E2E8F0"
+        )
+        self.label_titulo.pack(pady=(24, 18))
+
+        # Campos del formulario
+        self.entry_sitio = ctk.CTkEntry(
+            self,
+            width=360,
+            placeholder_text="Sitio Web / Aplicación (ej. github.com)"
+        )
+        self.entry_sitio.pack(pady=(0, 12))
+
+        self.entry_usuario = ctk.CTkEntry(
+            self,
+            width=360,
+            placeholder_text="Usuario / Correo Electrónico"
+        )
+        self.entry_usuario.pack(pady=(0, 12))
+
+        # Fila de contraseña + botón Generar en línea
+        self.pass_row = ctk.CTkFrame(self, fg_color="transparent")
+        self.pass_row.pack(pady=(0, 6))
+
+        self.entry_password = ctk.CTkEntry(
+            self.pass_row,
+            width=260,
+            placeholder_text="Contraseña",
+            show="*"
+        )
+        self.entry_password.pack(side="left", padx=(0, 10))
+
+        self.btn_generar = ctk.CTkButton(
+            self.pass_row,
+            text="🎲 Generar",
+            width=88,
+            height=34,
+            fg_color="#1E293B",
+            hover_color="#334155",
+            command=self.generar_y_rellenar
+        )
+        self.btn_generar.pack(side="left")
+
+        # Fila del Slider de longitud + etiqueta dinámica
+        self.longitud_pass = 16
+
+        self.slider_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.slider_frame.pack(pady=(8, 4), padx=30, fill="x")
+
+        self.label_longitud = ctk.CTkLabel(
+            self.slider_frame,
+            text=f"Longitud: {self.longitud_pass} caracteres",
+            font=ctk.CTkFont(size=12),
+            text_color="#94A3B8",
+            anchor="w"
+        )
+        self.label_longitud.pack(anchor="w", pady=(0, 6))
+
+        self.slider_longitud = ctk.CTkSlider(
+            self.slider_frame,
+            from_=8,
+            to=30,
+            number_of_steps=22,
+            command=self._on_slider_move
+        )
+        self.slider_longitud.set(self.longitud_pass)
+        self.slider_longitud.pack(fill="x", pady=(0, 4))
+
+        # Checkbox para mostrar/ocultar contraseña
+        self.show_pass_var = tk.StringVar(value="off")
+        self.check_show_pass = ctk.CTkCheckBox(
+            self,
+            text="Mostrar contraseña",
+            variable=self.show_pass_var,
+            onvalue="on",
+            offvalue="off",
+            command=self.toggle_password_visibility,
+            font=ctk.CTkFont(size=12),
+            text_color="#94A3B8"
+        )
+        self.check_show_pass.pack(pady=(10, 14))
+
+        # Recuperar categorías disponibles desde la API
+        self.categorias_map = {}
+        categorias_valores = ["Sin Categoría"]
+        try:
+            cats = obtener_categorias_api()
+            for c in cats:
+                self.categorias_map[c["nombre"]] = c["id"]
+                categorias_valores.append(c["nombre"])
+        except Exception as e:
+            logger.error(f"Error al cargar categorías en el formulario: {e}")
+
+        # Menú desplegable para seleccionar categoría
+        self.option_categoria = ctk.CTkOptionMenu(
+            self,
+            width=360,
+            values=categorias_valores
+        )
+        self.option_categoria.set("Sin Categoría")
+        self.option_categoria.pack(pady=(0, 14))
+
+        # Mensaje de error interno
+        self.label_error = ctk.CTkLabel(
+            self,
+            text="",
+            text_color="#FF5555",
+            font=ctk.CTkFont(size=12)
+        )
+        self.label_error.pack(pady=(0, 4))
+
+        # Botón de guardar
+        self.btn_guardar = ctk.CTkButton(
+            self,
+            text="Guardar Credencial",
+            width=220,
+            height=40,
+            fg_color="#6366F1",
+            hover_color="#4F46E5",
+            font=ctk.CTkFont(family="Helvetica", size=14, weight="bold"),
+            command=self.guardar_credencial
+        )
+        self.btn_guardar.pack(pady=(4, 20))
+
+    def center_toplevel(self, parent):
+        """Centra esta ventana sobre su ventana padre."""
+        self.update_idletasks()
+        parent_x = parent.winfo_rootx()
+        parent_y = parent.winfo_rooty()
+        parent_w = parent.winfo_width()
+        parent_h = parent.winfo_height()
+        w = self.winfo_width()
+        h = self.winfo_height()
+        x = parent_x + (parent_w - w) // 2
+        y = parent_y + (parent_h - h) // 2
+        self.geometry(f"+{x}+{y}")
+
+    def _on_slider_move(self, valor):
+        self.longitud_pass = int(valor)
+        self.label_longitud.configure(text=f"Longitud: {self.longitud_pass} caracteres")
+
+    def toggle_password_visibility(self):
+        if self.show_pass_var.get() == "on":
+            self.entry_password.configure(show="")
+        else:
+            self.entry_password.configure(show="*")
+
+    def generar_y_rellenar(self):
+        nueva_pass = generar_contrasena_segura(self.longitud_pass)
+        self.entry_password.configure(show="")
+        self.entry_password.delete(0, tk.END)
+        self.entry_password.insert(0, nueva_pass)
+        self.show_pass_var.set("on")
+        self.check_show_pass.select()
+
+    def guardar_credencial(self):
+        sitio = normalize_domain(self.entry_sitio.get())
+        usuario = self.entry_usuario.get().strip()
+        password = self.entry_password.get()
+
+        if not sitio or not usuario or not password:
+            self.label_error.configure(text="Por favor, completa todos los campos.")
+            return
+
+        try:
+            response = requests.post(
+                f"{API_BASE_URL}/credentials/add",
+                json={
+                    "username": self.username,
+                    "master_password": self.master_password,
+                    "sitio_web": sitio,
+                    "login_user": usuario,
+                    "password": password
+                },
+                timeout=10
+            )
+
+            if response.status_code == 201:
+                logger.info(f"Credencial para '{sitio}' guardada con éxito vía API.")
+                self.on_save_callback()
+                self.destroy()
+            elif response.status_code == 429:
+                self.label_error.configure(text="Has superado el límite de peticiones. Espera un momento.")
+            else:
+                data = response.json() if response.headers.get("content-type") == "application/json" else {}
+                self.label_error.configure(text=data.get("error", "Error al guardar la credencial."))
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error al conectar con la API al guardar credencial: {e}")
+            self.label_error.configure(text="Error de conexión con el servidor.")
+
+
+class GenerarContrasenaWindow(ctk.CTkToplevel):
+    """
+    Ventana emergente (modal) que actúa como generador seguro de contraseñas.
+    """
+    def __init__(self, parent: ctk.CTkFrame, app_root: ctk.CTk):
+        super().__init__(parent)
+        self.app_root = app_root
+
+        self.title("Generador Seguro de Contraseñas")
+        self.geometry("420x380")
+        self.resizable(False, False)
+
+        self.transient(parent)
+        self.grab_set()
+        self.focus_force()
+        self.center_toplevel(parent)
+
+        self.longitud = 16
+
+        self.label_titulo = ctk.CTkLabel(
+            self,
+            text="Generador de Contraseñas",
+            font=ctk.CTkFont(family="Helvetica", size=20, weight="bold")
+        )
+        self.label_titulo.pack(pady=(20, 15))
+
+        self.entry_pass = ctk.CTkEntry(
+            self,
+            width=320,
+            height=40,
+            font=ctk.CTkFont(family="Consolas", size=16, weight="bold"),
+            justify="center"
+        )
+        self.entry_pass.pack(pady=10)
+
+        self.label_longitud = ctk.CTkLabel(
+            self,
+            text=f"Longitud: {self.longitud} caracteres",
+            font=ctk.CTkFont(family="Helvetica", size=13)
+        )
+        self.label_longitud.pack(pady=(10, 0))
+
+        self.slider = ctk.CTkSlider(
+            self,
+            from_=8,
+            to=32,
+            number_of_steps=24,
+            command=self.on_slider_move
+        )
+        self.slider.set(self.longitud)
+        self.slider.pack(pady=10, padx=40, fill="x")
+
+        self.buttons_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.buttons_frame.pack(pady=15)
+
+        self.btn_regenerar = ctk.CTkButton(
+            self.buttons_frame,
+            text="Regenerar",
+            width=120,
+            fg_color="#3A3A3A",
+            hover_color="#555555",
+            command=self.regenerar_password
+        )
+        self.btn_regenerar.grid(row=0, column=0, padx=10)
+
+        self.btn_copiar = ctk.CTkButton(
+            self.buttons_frame,
+            text="Copiar",
+            width=120,
+            fg_color="#1F6AA5",
+            hover_color="#144870",
+            command=self.copiar_resultado
+        )
+        self.btn_copiar.grid(row=0, column=1, padx=10)
+
+        self.label_info = ctk.CTkLabel(
+            self,
+            text="",
+            font=ctk.CTkFont(size=12)
+        )
+        self.label_info.pack(pady=5)
+
+        self.regenerar_password()
+
+    def center_toplevel(self, parent):
+        self.update_idletasks()
+        parent_x = parent.winfo_rootx()
+        parent_y = parent.winfo_rooty()
+        parent_w = parent.winfo_width()
+        parent_h = parent.winfo_height()
+        w = self.winfo_width()
+        h = self.winfo_height()
+        x = parent_x + (parent_w - w) // 2
+        y = parent_y + (parent_h - h) // 2
+        self.geometry(f"+{x}+{y}")
+
+    def on_slider_move(self, val):
+        self.longitud = int(val)
+        self.label_longitud.configure(text=f"Longitud: {self.longitud} caracteres")
+        self.regenerar_password()
+
+    def regenerar_password(self):
+        self.password_actual = generar_contrasena_segura(self.longitud)
+        self.entry_pass.configure(state="normal")
+        self.entry_pass.delete(0, tk.END)
+        self.entry_pass.insert(0, self.password_actual)
+        self.entry_pass.configure(state="readonly")
+
+    def copiar_resultado(self):
+        self.app_root.copiar_al_portapapeles(self.password_actual)
+        self.btn_copiar.configure(text="¡Copiada!", fg_color="#2ECC71", state="disabled")
+        self.after(3000, lambda: self.btn_copiar.configure(text="Copiar", fg_color="#1F6AA5", state="normal"))
+        self.label_info.configure(text="Contraseña copiada. Portapapeles se limpiará en 30 segundos.", text_color="#2ECC71")
+        self.after(4000, lambda: self.label_info.configure(text=""))
+
+
+class EditarCredencialWindow(ctk.CTkToplevel):
+    """
+    Ventana modal para editar una credencial existente a través de la API.
+    """
+    def __init__(
+        self,
+        parent: ctk.CTkFrame,
+        credencial_id: str,
+        sitio_web_actual: str,
+        login_user_actual: str,
+        categoria_nombre_actual: str,
+        username: str,
+        master_password: str,
+        on_save_callback: Callable[[], None]
+    ):
+        super().__init__(parent)
+        self.credencial_id = credencial_id
+        self.username = username
+        self.master_password = master_password
+        self.on_save_callback = on_save_callback
+
+        self.title("Editar Credencial")
+        self.geometry("400x560")
+        self.resizable(False, False)
+
+        self.transient(parent)
+        self.grab_set()
+        self.focus_force()
+        self.center_toplevel(parent)
+
+        ctk.CTkLabel(
+            self,
+            text="Editar Credencial",
+            font=ctk.CTkFont(family="Helvetica", size=20, weight="bold")
+        ).pack(pady=(20, 15))
+
+        self.entry_sitio = ctk.CTkEntry(self, width=300, placeholder_text="Sitio Web / Aplicación")
+        self.entry_sitio.insert(0, sitio_web_actual)
+        self.entry_sitio.pack(pady=8)
+
+        self.entry_usuario = ctk.CTkEntry(self, width=300, placeholder_text="Usuario / Correo Electrónico")
+        self.entry_usuario.insert(0, login_user_actual)
+        self.entry_usuario.pack(pady=8)
+
+        self.pass_row = ctk.CTkFrame(self, fg_color="transparent")  
+        self.pass_row.pack(pady=8)
+
+        self.entry_password = ctk.CTkEntry(
+            self.pass_row,
+            width=210,
+            placeholder_text="Nueva contraseña (vacío = actual)",
+            show="*"
+        )
+        self.entry_password.pack(side="left", padx=(0, 8))
+
+        self.btn_generar = ctk.CTkButton(
+            self.pass_row,
+            text="🎲 Generar",
+            width=80,
+            height=32,
+            fg_color="#3A3A3A",
+            hover_color="#555555",
+            command=self.generar_y_rellenar
+        )
+        self.btn_generar.pack(side="left")
+
+        self.longitud_pass = 16
+
+        self.slider_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.slider_frame.pack(pady=(4, 2), padx=20, fill="x")
+
+        self.label_longitud = ctk.CTkLabel(
+            self.slider_frame,
+            text=f"Longitud: {self.longitud_pass} caracteres",
+            font=ctk.CTkFont(size=12),
+            anchor="w"
+        )
+        self.label_longitud.pack(anchor="w", pady=(0, 4))
+
+        self.slider_longitud = ctk.CTkSlider(
+            self.slider_frame,
+            from_=8,
+            to=30,
+            number_of_steps=22,
+            command=self._on_slider_move
+        )
+        self.slider_longitud.set(self.longitud_pass)
+        self.slider_longitud.pack(fill="x", pady=(0, 4))
+
+        self.show_pass_var = tk.StringVar(value="off")
+        self.check_show_pass = ctk.CTkCheckBox(
+            self,
+            text="Mostrar contraseña",
+            variable=self.show_pass_var,
+            onvalue="on",
+            offvalue="off",
+            command=self.toggle_password_visibility,
+            font=ctk.CTkFont(size=12)
+        )
+        self.check_show_pass.pack(pady=(5, 10))
+
+        # Selector de categoría desde la API
+        self.categorias_map = {}
+        categorias_valores = ["Sin Categoría"]
+        nombre_cat_actual = categoria_nombre_actual or "Sin Categoría"
+        try:
+            cats = obtener_categorias_api()
+            for c in cats:
+                self.categorias_map[c["nombre"]] = c["id"]
+                categorias_valores.append(c["nombre"])
+        except Exception as e:
+            logger.error(f"Error al cargar categorías en ventana de edición: {e}")
+
+        self.option_categoria = ctk.CTkOptionMenu(self, width=300, values=categorias_valores)
+        self.option_categoria.set(nombre_cat_actual)
+        self.option_categoria.pack(pady=8)
+
+        self.label_error = ctk.CTkLabel(self, text="", text_color="#FF3333", font=ctk.CTkFont(size=12))
+        self.label_error.pack(pady=4)
+
+        ctk.CTkButton(
+            self,
+            text="Guardar Cambios",
+            width=200,
+            fg_color="#1F6AA5",
+            hover_color="#144870",
+            command=self.guardar_cambios
+        ).pack(pady=(5, 15))
+
+    def center_toplevel(self, parent):
+        self.update_idletasks()
+        x = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2
+        y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
+        self.geometry(f"+{x}+{y}")
+
+    def _on_slider_move(self, valor):
+        self.longitud_pass = int(valor)
+        self.label_longitud.configure(text=f"Longitud: {self.longitud_pass} caracteres")
+
+    def generar_y_rellenar(self):
+        nueva_pass = generar_contrasena_segura(self.longitud_pass)
+        self.entry_password.configure(show="")
+        self.entry_password.delete(0, tk.END)
+        self.entry_password.insert(0, nueva_pass)
+        self.show_pass_var.set("on")
+        self.check_show_pass.select()
+
+    def toggle_password_visibility(self):
+        self.entry_password.configure(show="" if self.show_pass_var.get() == "on" else "*")
+
+    def guardar_cambios(self):
+        sitio = normalize_domain(self.entry_sitio.get())
+        usuario = self.entry_usuario.get().strip()
+        nueva_pass = self.entry_password.get()
+
+        if not sitio or not usuario:
+            self.label_error.configure(text="Sitio web y usuario no pueden estar vacíos.")
+            return
+
+        payload = {
+            "id": self.credencial_id,
+            "username": self.username,
+            "master_password": self.master_password,
+            "sitio_web": sitio,
+            "login_user": usuario
+        }
+        if nueva_pass:
+            payload["password"] = nueva_pass
+
+        try:
+            response = requests.post(
+                f"{API_BASE_URL}/credentials/update",
+                json=payload,
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                logger.info(f"Credencial '{sitio}' (ID: {self.credencial_id}) actualizada vía API.")
+                self.on_save_callback()
+                self.destroy()
+            elif response.status_code == 429:
+                self.label_error.configure(text="Has superado el límite de peticiones. Espera un momento.")
+            else:
+                data = response.json() if response.headers.get("content-type") == "application/json" else {}
+                self.label_error.configure(text=data.get("error", "Error al actualizar la credencial."))
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error de conexión al actualizar credencial: {e}")
+            self.label_error.configure(text="Error de conexión con el servidor.")
+
+
+class DashboardFrame(ctk.CTkFrame):
+    """
+    Frame principal que representa la bóveda una vez que el usuario inicia sesión.
+    Conecta exclusivamente con la API REST en Render.
+    """
+    def __init__(self, parent: ctk.CTk, username: str, master_password: str, on_logout: Callable[[], None]):
+        super().__init__(parent, fg_color="transparent")
+        self.parent = parent
+        self.username = username
+        self.master_password = master_password
+        self.on_logout = on_logout
+        self._notif_timer = None
+        self._mostrar_timers = {}
+
+        self.grid_columnconfigure(0, weight=0, minsize=200)
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        # Sidebar
+        self.sidebar_frame = ctk.CTkFrame(
+            self,
+            width=200,
+            fg_color="#0F172A",
+            corner_radius=0,
+            border_width=0
+        )
+        self.sidebar_frame.grid(row=0, column=0, sticky="nsew")
+        self.sidebar_frame.grid_propagate(False)
+
+        self.label_lockbox = ctk.CTkLabel(
+            self.sidebar_frame,
+            text="LOCKBOX",
+            font=ctk.CTkFont(family="Helvetica", size=24, weight="bold"),
+            text_color="#6366F1"
+        )
+        self.label_lockbox.pack(pady=(30, 25), padx=20, anchor="w")
+
+        self.btn_mi_boveda = ctk.CTkButton(
+            self.sidebar_frame,
+            text="🔑 Mi Bóveda",
+            font=ctk.CTkFont(family="Helvetica", size=14, weight="bold"),
+            fg_color="#1E293B",
+            hover_color="#334155",
+            anchor="w",
+            height=40
+        )
+        self.btn_mi_boveda.pack(pady=6, padx=15, fill="x")
+
+        self.btn_generador = ctk.CTkButton(
+            self.sidebar_frame,
+            text="⚙️ Generador",
+            font=ctk.CTkFont(family="Helvetica", size=14),
+            fg_color="transparent",
+            hover_color="#334155",
+            anchor="w",
+            height=40,
+            command=self.abrir_ventana_generador
+        )
+        self.btn_generador.pack(pady=6, padx=15, fill="x")
+
+        self.btn_logout = ctk.CTkButton(
+            self.sidebar_frame,
+            text="Cerrar Sesión",
+            font=ctk.CTkFont(family="Helvetica", size=13),
+            fg_color="#A51F1F",
+            hover_color="#701414",
+            height=35,
+            command=self.on_logout
+        )
+        self.btn_logout.pack(side="bottom", pady=25, padx=15, fill="x")
+
+        # Panel de Contenido
+        self.content_panel = ctk.CTkFrame(
+            self,
+            fg_color="transparent",
+            border_width=0
+        )
+        self.content_panel.grid(row=0, column=1, sticky="nsew", padx=20, pady=20)
+        
+        self.content_panel.grid_columnconfigure(0, weight=1)
+        self.content_panel.grid_rowconfigure(0, weight=0)
+        self.content_panel.grid_rowconfigure(1, weight=0)
+        self.content_panel.grid_rowconfigure(2, weight=1)
+
+        # Barra de Búsqueda
+        self.search_entry = ctk.CTkEntry(
+            self.content_panel,
+            height=45,
+            placeholder_text="🔍 Buscar sitio, usuario o categoría...",
+            font=ctk.CTkFont(family="Helvetica", size=14)
+        )
+        self.search_entry.grid(row=0, column=0, sticky="ew", pady=(0, 15))
+        self.search_entry.bind("<KeyRelease>", lambda e: self.cargar_credenciales())
+
+        # Contenedor de Controles
+        self.controls_frame = ctk.CTkFrame(self.content_panel, fg_color="transparent", border_width=0)
+        self.controls_frame.grid(row=1, column=0, sticky="ew", pady=(0, 15))
+        self.controls_frame.grid_columnconfigure(0, weight=0)
+        self.controls_frame.grid_columnconfigure(1, weight=1)
+        self.controls_frame.grid_columnconfigure(2, weight=0)
+
+        self.categoria_var = tk.StringVar(value="Todas")
+        category_values = ["Todas"]
+        try:
+            cats = obtener_categorias_api()
+            for c in cats:
+                category_values.append(c["nombre"])
+        except Exception as e:
+            logger.error(f"Error al cargar categorías para filtro: {e}")
+
+        self.categoria_menu = ctk.CTkOptionMenu(
+            self.controls_frame,
+            variable=self.categoria_var,
+            values=category_values,
+            width=150,
+            command=lambda _: self.cargar_credenciales()
+        )
+        self.categoria_menu.grid(row=0, column=0, sticky="w")
+
+        self.label_notificacion = ctk.CTkLabel(
+            self.controls_frame,
+            text="",
+            font=ctk.CTkFont(family="Helvetica", size=13, weight="bold")
+        )
+        self.label_notificacion.grid(row=0, column=1, padx=10)
+
+        self.btn_agregar = ctk.CTkButton(
+            self.controls_frame,
+            text="+ Agregar Credencial",
+            font=ctk.CTkFont(family="Helvetica", size=13, weight="bold"),
+            command=self.abrir_ventana_agregar,
+            width=160
+        )
+        self.btn_agregar.grid(row=0, column=2, sticky="e")
+
+        self.scroll_frame = ctk.CTkScrollableFrame(self.content_panel, fg_color="transparent")
+        self.scroll_frame.grid(row=2, column=0, sticky="nsew")
+
+        self.cargar_credenciales()
+
+    def mostrar_notificacion_temporal(self, mensaje: str, es_error: bool = False):
+        color = "#FF3333" if es_error else "#2ECC71"
+        self.label_notificacion.configure(text=mensaje, text_color=color)
+
+        if self._notif_timer:
+            self.after_cancel(self._notif_timer)
+
+        self._notif_timer = self.after(4000, lambda: self.label_notificacion.configure(text=""))
+
+    def cargar_credenciales(self):
+        for timer_id in list(self._mostrar_timers.values()):
+            try:
+                self.after_cancel(timer_id)
+            except Exception:
+                pass
+        self._mostrar_timers.clear()
+
+        for widget in self.scroll_frame.winfo_children():
+            widget.destroy()
+
+        texto_busqueda = self.search_entry.get().strip().lower()
+        categoria_seleccionada = self.categoria_var.get()
+
+        try:
+            response = requests.post(
+                f"{API_BASE_URL}/credentials",
+                json={
+                    "username": self.username,
+                    "master_password": self.master_password
+                },
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                credenciales = response.json().get("credenciales", [])
+
+                # Filtrar por categoría
+                if categoria_seleccionada != "Todas":
+                    credenciales = [c for c in credenciales if c.get("categoria") == categoria_seleccionada]
+
+                # Filtrar por texto de búsqueda
+                if texto_busqueda:
+                    credenciales = [
+                        c for c in credenciales
+                        if texto_busqueda in c.get("sitio_web", "").lower()
+                        or texto_busqueda in c.get("login_user", "").lower()
+                    ]
+
+                if not credenciales:
+                    self.mostrar_mensaje_vacio()
+                    return
+
+                for i, cred in enumerate(credenciales):
+                    self.crear_tarjeta_credencial(
+                        credencial_id=cred.get("id"),
+                        sitio_web=cred.get("sitio_web"),
+                        login_user=cred.get("login_user"),
+                        password=cred.get("password"),
+                        categoria_nombre=cred.get("categoria"),
+                        index=i
+                    )
+            elif response.status_code == 429:
+                self.mostrar_notificacion_temporal("Límite de peticiones alcanzado (Rate Limit). Espera un momento.", es_error=True)
+            else:
+                data = response.json() if response.headers.get("content-type") == "application/json" else {}
+                err_msg = data.get("error", "Error al cargar credenciales.")
+                self.mostrar_notificacion_temporal(err_msg, es_error=True)
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error al cargar las credenciales vía API: {e}")
+            label_error = ctk.CTkLabel(
+                self.scroll_frame,
+                text="Error al conectar con la API en Render para cargar las credenciales.",
+                text_color="#FF3333"
+            )
+            label_error.pack(pady=20)
+
+    def mostrar_mensaje_vacio(self):
+        self.container_vacio = ctk.CTkFrame(self.scroll_frame, fg_color="transparent")
+        self.container_vacio.pack(expand=True, fill="both", pady=80)
+        
+        label_vacio = ctk.CTkLabel(
+            self.container_vacio,
+            text="No tienes ninguna credencial guardada.",
+            font=ctk.CTkFont(size=14, slant="italic"),
+            text_color="#888888"
+        )
+        label_vacio.pack(pady=10)
+        
+        btn_primer_registro = ctk.CTkButton(
+            self.container_vacio,
+            text="Crea tu primera credencial",
+            width=180,
+            command=self.abrir_ventana_agregar
+        )
+        btn_primer_registro.pack(pady=10)
+
+    def crear_tarjeta_credencial(
+        self,
+        credencial_id: str,
+        sitio_web: str,
+        login_user: str,
+        password: str,
+        categoria_nombre: str,
+        index: int
+    ):
+        card = ctk.CTkFrame(
+            self.scroll_frame,
+            height=100,
+            corner_radius=10,
+            border_width=1
+        )
+        card.pack(fill="x", pady=6, padx=5)
+        card.pack_propagate(False)
+
+        card.grid_columnconfigure(0, weight=1)
+        card.grid_columnconfigure(1, weight=0)
+        card.grid_rowconfigure(0, weight=1)
+
+        text_container = ctk.CTkFrame(card, fg_color="transparent", border_width=0)
+        text_container.grid(row=0, column=0, sticky="w", padx=25, pady=8)
+
+        label_sitio = ctk.CTkLabel(
+            text_container,
+            text=sitio_web,
+            font=ctk.CTkFont(family="Helvetica", size=16, weight="bold"),
+            text_color="#38BDF8",
+            anchor="w"
+        )
+        label_sitio.pack(anchor="w", pady=(0, 2))
+
+        label_user = ctk.CTkLabel(
+            text_container,
+            text=f"Usuario: {login_user}",
+            font=ctk.CTkFont(family="Helvetica", size=13),
+            text_color="#94A3B8",
+            anchor="w"
+        )
+        label_user.pack(anchor="w", pady=(0, 2))
+
+        label_pass = ctk.CTkLabel(
+            text_container,
+            text="••••••••",
+            font=ctk.CTkFont(family="Consolas", size=13),
+            text_color="#64748B",
+            anchor="w"
+        )
+        label_pass.pack(anchor="w")
+
+        buttons_container = ctk.CTkFrame(card, fg_color="transparent", border_width=0)
+        buttons_container.grid(row=0, column=1, sticky="e", padx=15, pady=8)
+
+        btn_mostrar = ctk.CTkButton(
+            buttons_container,
+            text="Mostrar",
+            width=75,
+            height=32,
+            font=ctk.CTkFont(size=12),
+            fg_color="#334155",
+            hover_color="#475569"
+        )
+        btn_mostrar.configure(
+            command=lambda p=password, lp=label_pass, bm=btn_mostrar, cid=credencial_id:
+                self.toggle_mostrar_contrasena(p, lp, bm, cid)
+        )
+        btn_mostrar.pack(side="left", padx=4)
+
+        btn_copiar_user = ctk.CTkButton(
+            buttons_container,
+            text="👤 Usuario",
+            width=90,
+            height=32,
+            font=ctk.CTkFont(size=12),
+            fg_color="#334155",
+            hover_color="#475569"
+        )
+        btn_copiar_user.configure(
+            command=lambda u=login_user, b=btn_copiar_user:
+                self.copiar_usuario(u, b)
+        )
+        btn_copiar_user.pack(side="left", padx=4)
+
+        btn_copiar_pass = ctk.CTkButton(
+            buttons_container,
+            text="🔑 Clave",
+            width=80,
+            height=32,
+            font=ctk.CTkFont(size=12),
+            fg_color="#334155",
+            hover_color="#475569"
+        )
+        btn_copiar_pass.configure(
+            command=lambda p=password, b=btn_copiar_pass:
+                self.copiar_contrasena(p, b)
+        )
+        btn_copiar_pass.pack(side="left", padx=4)
+
+        btn_editar = ctk.CTkButton(
+            buttons_container,
+            text="Editar",
+            width=65,
+            height=32,
+            font=ctk.CTkFont(size=12),
+            fg_color="#334155",
+            hover_color="#475569"
+        )
+        btn_editar.configure(
+            command=lambda cid=credencial_id, s=sitio_web, u=login_user, catname=categoria_nombre:
+                self.abrir_ventana_editar(cid, s, u, catname)
+        )
+        btn_editar.pack(side="left", padx=4)
+
+        btn_eliminar = ctk.CTkButton(
+            buttons_container,
+            text="Eliminar",
+            width=75,
+            height=32,
+            font=ctk.CTkFont(size=12),
+            fg_color="#991B1B",
+            hover_color="#DC2626"
+        )
+        btn_eliminar.configure(
+            command=lambda cid=credencial_id, s=sitio_web:
+                self.eliminar_credencial(cid, s)
+        )
+        btn_eliminar.pack(side="left", padx=4)
+
+    def copiar_usuario(self, usuario: str, boton: ctk.CTkButton):
+        import pyperclip
+        try:
+            pyperclip.copy(usuario)
+            boton.configure(text="¡Copiado!", fg_color="#059669", state="disabled")
+            self.after(2000, lambda: boton.configure(text="👤 Usuario", fg_color="#334155", state="normal"))
+            self.mostrar_notificacion_temporal("¡Usuario copiado al portapapeles!")
+        except Exception as e:
+            logger.error(f"Error al copiar usuario: {e}")
+
+    def toggle_mostrar_contrasena(self, password: str, label_pass: ctk.CTkLabel, boton_mostrar: ctk.CTkButton, credencial_id: str):
+        if credencial_id in self._mostrar_timers:
+            self.after_cancel(self._mostrar_timers[credencial_id])
+            del self._mostrar_timers[credencial_id]
+
+        if boton_mostrar.cget("text") == "Mostrar":
+            label_pass.configure(text=password, text_color="#2ECC71")
+            boton_mostrar.configure(text="Ocultar", fg_color="#475569", hover_color="#64748B")
+            
+            timer_id = self.after(15000, lambda: self.ocultar_contrasena_auto(label_pass, boton_mostrar, credencial_id))
+            self._mostrar_timers[credencial_id] = timer_id
+        else:
+            label_pass.configure(text="••••••••", text_color="#64748B")
+            boton_mostrar.configure(text="Mostrar", fg_color="#334155", hover_color="#475569")
+
+    def ocultar_contrasena_auto(self, label_pass: ctk.CTkLabel, boton_mostrar: ctk.CTkButton, credencial_id: str):
+        if label_pass.winfo_exists():
+            label_pass.configure(text="••••••••", text_color="#64748B")
+        if boton_mostrar.winfo_exists():
+            boton_mostrar.configure(text="Mostrar", fg_color="#334155", hover_color="#475569")
+        if credencial_id in self._mostrar_timers:
+            del self._mostrar_timers[credencial_id]
+
+    def copiar_contrasena(self, password: str, boton: ctk.CTkButton):
+        try:
+            self.parent.copiar_al_portapapeles(password)
+            boton.configure(text="¡Copiada!", fg_color="#059669", state="disabled")
+            self.after(3000, lambda: boton.configure(text="🔑 Clave", fg_color="#334155", state="normal"))
+            self.mostrar_notificacion_temporal("¡Contraseña copiada al portapapeles! Se limpiará en 30 segundos.")
+        except Exception as e:
+            logger.error(f"Error al copiar contraseña: {e}")
+            messagebox.showerror("Error", f"No se pudo copiar la contraseña.\nDetalle: {e}")
+
+    def eliminar_credencial(self, credencial_id: str, sitio_web: str):
+        confirmar = messagebox.askyesno(
+            title="Confirmar eliminación",
+            message=f"¿Estás seguro de que deseas eliminar la credencial de '{sitio_web}'?\n\nEsta acción no se puede deshacer."
+        )
+        if not confirmar:
+            return
+
+        try:
+            response = requests.post(
+                f"{API_BASE_URL}/credentials/delete",
+                json={
+                    "id": credencial_id,
+                    "username": self.username,
+                    "master_password": self.master_password
+                },
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                logger.info(f"Credencial '{sitio_web}' (ID: {credencial_id}) eliminada vía API.")
+                self.mostrar_notificacion_temporal(f"Credencial '{sitio_web}' eliminada.")
+                self.cargar_credenciales()
+            elif response.status_code == 429:
+                messagebox.showerror("Límite superado", "Has alcanzado el límite de intentos. Por favor espera un momento.")
+            else:
+                data = response.json() if response.headers.get("content-type") == "application/json" else {}
+                err_msg = data.get("error", "No se pudo eliminar la credencial.")
+                messagebox.showerror("Error", err_msg)
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error al eliminar credencial vía API: {e}")
+            messagebox.showerror("Error de Conexión", f"No se pudo conectar con el servidor.\nDetalle: {e}")
+
+    def abrir_ventana_editar(self, credencial_id: str, sitio_web: str, login_user: str, categoria_nombre: str):
+        EditarCredencialWindow(
+            parent=self,
+            credencial_id=credencial_id,
+            sitio_web_actual=sitio_web,
+            login_user_actual=login_user,
+            categoria_nombre_actual=categoria_nombre,
+            username=self.username,
+            master_password=self.master_password,
+            on_save_callback=self.cargar_credenciales
+        )
+
+    def abrir_ventana_agregar(self):
+        AgregarCredencialWindow(
+            self,
+            username=self.username,
+            master_password=self.master_password,
+            on_save_callback=self.cargar_credenciales
+        )
+
+    def abrir_ventana_generador(self):
+        GenerarContrasenaWindow(self, self.parent)
+
+
+class App(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+
+        self.title("Gestor de Contraseñas Lockbox")
+        self.geometry("450x550")
+        self.resizable(False, False)
+        self.center_window()
+
+        self.username = None
+        self.master_password = None
+        self.dashboard_frame = None
+        self._clipboard_timer = None
+
+        self.setup_login_ui()
+        self.check_api_connection()
+
+    def center_window(self):
+        self.update_idletasks()
+        width = self.winfo_width()
+        height = self.winfo_height()
+        x = (self.winfo_screenwidth() // 2) - (width // 2)
+        y = (self.winfo_screenheight() // 2) - (height // 2)
+        self.geometry(f"{width}x{height}+{x}+{y}")
+
+    def check_api_connection(self):
+        """Verifica la conectividad inicial con la API en Render."""
+        try:
+            response = requests.get(f"{API_BASE_URL}/ping", timeout=5)
+            if response.status_code == 200:
+                logger.info("Conexión con la API en Render verificada con éxito.")
+            else:
+                self.show_status("Advertencia: El servidor respondió con un estado inesperado.", is_error=True)
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"No se pudo conectar con la API en {API_BASE_URL}: {e}")
+            self.show_status("API no conectada (Render puede estar iniciando...).", is_error=True)
+
+    def show_status(self, message: str, is_error: bool = False):
+        color = "#FF3333" if is_error else "#2ECC71"
+        if hasattr(self, 'status_label') and self.status_label.winfo_exists():
+            self.status_label.configure(text=message, text_color=color)
+
+    def setup_login_ui(self):
+        if self.dashboard_frame:
+            self.dashboard_frame.destroy()
+            self.dashboard_frame = None
+
+        self.title_label = ctk.CTkLabel(
+            self, 
+            text="LOCKBOX", 
+            font=ctk.CTkFont(family="Helvetica", size=32, weight="bold"),
+            text_color="#1F6AA5"
+        )
+        self.title_label.pack(pady=(40, 10))
+
+        self.subtitle_label = ctk.CTkLabel(
+            self, 
+            text="Tu gestor de contraseñas seguro en la Nube", 
+            font=ctk.CTkFont(family="Helvetica", size=14, slant="italic"),
+            text_color="#888888"
+        )
+        self.subtitle_label.pack(pady=(0, 20))
+
+        self.tabview = ctk.CTkTabview(self, width=380, height=320)
+        self.tabview.pack(pady=10)
+
+        self.tabview.add("Iniciar Sesión")
+        self.tabview.add("Registrarse")
+
+        self.setup_login_tab()
+        self.setup_register_tab()
+
+        self.status_label = ctk.CTkLabel(
+            self,
+            text="",
+            font=ctk.CTkFont(family="Helvetica", size=13, weight="normal"),
+            wraplength=380
+        )
+        self.status_label.pack(pady=(15, 10))
+
+    def setup_login_tab(self):
+        tab = self.tabview.tab("Iniciar Sesión")
+        container = ctk.CTkFrame(tab, fg_color="transparent")
+        container.pack(expand=True, fill="both", padx=20, pady=10)
+
+        self.login_user_entry = ctk.CTkEntry(container, width=280, placeholder_text="Nombre de usuario")
+        self.login_user_entry.pack(pady=12)
+
+        self.login_pass_entry = ctk.CTkEntry(container, width=280, placeholder_text="Contraseña Maestra", show="*")
+        self.login_pass_entry.pack(pady=12)
+
+        self.login_button = ctk.CTkButton(container, text="Ingresar", width=280, command=self.handle_login)
+        self.login_button.pack(pady=20)
+
+        link_olvido = ctk.CTkLabel(
+            master=container,
+            text="¿Olvidaste tu usuario o contraseña?",
+            text_color="#8b9eb3",
+            cursor="hand2",
+            font=("Arial", 11, "underline")
+        )
+        link_olvido.pack(pady=(12, 0))
+        link_olvido.bind("<Button-1>", lambda e: self.abrir_ventana_recuperacion())
+
+    def setup_register_tab(self):
+        tab = self.tabview.tab("Registrarse")
+        container = ctk.CTkFrame(tab, fg_color="transparent")
+        container.pack(expand=True, fill="both", padx=20, pady=10)
+
+        self.register_user_entry = ctk.CTkEntry(container, width=280, placeholder_text="Nombre de usuario")
+        self.register_user_entry.pack(pady=12)
+
+        self.register_pass_entry = ctk.CTkEntry(container, width=280, placeholder_text="Contraseña Maestra", show="*")
+        self.register_pass_entry.pack(pady=12)
+
+        self.register_button = ctk.CTkButton(
+            container, 
+            text="Registrar Usuario", 
+            width=280,
+            fg_color="#1F6AA5",
+            hover_color="#144870",
+            command=self.handle_register
+        )
+        self.register_button.pack(pady=20)
+
+    def abrir_ventana_recuperacion(self):
+        win_recovery = ctk.CTkToplevel(self)
+        win_recovery.title("Recuperar Cuenta - Lockbox")
+        win_recovery.geometry("420x450")
+        win_recovery.resizable(False, False)
+        
+        win_recovery.transient(self)
+        win_recovery.grab_set()
+        win_recovery.focus_force()
+
+        win_recovery.update_idletasks()
+        parent_x = self.winfo_rootx()
+        parent_y = self.winfo_rooty()
+        parent_w = self.winfo_width()
+        parent_h = self.winfo_height()
+        
+        w = 420
+        h = 450
+        x = parent_x + (parent_w - w) // 2
+        y = parent_y + (parent_h - h) // 2
+        win_recovery.geometry(f"{w}x{h}+{x}+{y}")
+
+        title = ctk.CTkLabel(win_recovery, text="Restablecer Contraseña", font=("Arial", 18, "bold"))
+        title.pack(pady=(20, 10))
+
+        warning_box = ctk.CTkTextbox(win_recovery, width=360, height=80, activate_scrollbars=False)
+        warning_box.insert("1.0", "⚠️ IMPORTANTE:\nPara restablecer tu acceso necesitas la Clave de Recuperación que se te proporcionó al registrarte. Lockbox no guarda tu contraseña maestra.")
+        warning_box.configure(state="disabled", text_color="#ffcc00", fg_color="#2b2b2b")
+        warning_box.pack(pady=5)
+
+        user_entry = ctk.CTkEntry(win_recovery, placeholder_text="Nombre de usuario", width=340)
+        user_entry.pack(pady=8)
+
+        key_entry = ctk.CTkEntry(win_recovery, placeholder_text="Clave de Recuperación (ej: LOCK-XXXX)", width=340)
+        key_entry.pack(pady=8)
+
+        new_pass_entry = ctk.CTkEntry(win_recovery, placeholder_text="Nueva Contraseña Maestra", show="•", width=340)
+        new_pass_entry.pack(pady=8)
+
+        def ejecutar_recuperacion():
+            usuario = user_entry.get().strip()
+            clave_rec = key_entry.get().strip()
+            nueva_pass = new_pass_entry.get()
+
+            if not usuario or not clave_rec or not nueva_pass:
+                messagebox.showerror("Error", "Por favor completa todos los campos.", parent=win_recovery)
+                return
+
+            try:
+                response = requests.post(
+                    f"{API_BASE_URL}/recover",
+                    json={
+                        "username": usuario,
+                        "recovery_key": clave_rec,
+                        "new_master_password": nueva_pass
+                    },
+                    timeout=10
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    messagebox.showinfo("¡Éxito!", data.get("message", "Contraseña restablecida correctamente."), parent=win_recovery)
+                    win_recovery.destroy()
+                elif response.status_code == 429:
+                    messagebox.showerror("Límite superado", "Has intentado demasiadas veces. Por favor espera un momento.", parent=win_recovery)
+                else:
+                    data = response.json() if response.headers.get("content-type") == "application/json" else {}
+                    err_msg = data.get("error", "No se pudo restablecer la contraseña.")
+                    messagebox.showerror("Error de Autenticación", err_msg, parent=win_recovery)
+            except requests.exceptions.RequestException as e:
+                messagebox.showerror("Error de Conexión", f"No se pudo conectar con el servidor.\nDetalle: {e}", parent=win_recovery)
+
+        btn_restablecer = ctk.CTkButton(
+            win_recovery, 
+            text="Restablecer Contraseña", 
+            fg_color="#3b82f6", 
+            hover_color="#2563eb",
+            command=ejecutar_recuperacion,
+            width=340
+        )
+        btn_restablecer.pack(pady=20)
+
+    def destroy_login_ui(self):
+        self.title_label.destroy()
+        self.subtitle_label.destroy()
+        self.tabview.destroy()
+        self.status_label.destroy()
+
+    def handle_login(self):
+        username = self.login_user_entry.get().strip()
+        password = self.login_pass_entry.get()
+
+        if not username or not password:
+            self.show_status("Por favor, llena todos los campos.", is_error=True)
+            return
+
+        self.show_status("Verificando credenciales con la API...")
+
+        try:
+            response = requests.post(
+                f"{API_BASE_URL}/login",
+                json={"username": username, "master_password": password},
+                timeout=15
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                self.username = data.get("username", username)
+                self.master_password = password
+                logger.info(f"Acceso concedido vía API a la bóveda para el usuario: {username}")
+                self.mostrar_dashboard()
+            elif response.status_code == 429:
+                self.show_status("Has superado el límite de intentos. Por favor, espera un momento.", is_error=True)
+            else:
+                data = response.json() if response.headers.get("content-type") == "application/json" else {}
+                err_msg = data.get("error", "Nombre de usuario o contraseña incorrectos.")
+                self.show_status(err_msg, is_error=True)
+
+        except requests.exceptions.RequestException as err:
+            logger.error(f"Error de conexión durante login: {err}")
+            self.show_status("Error de conexión con el servidor API en Render.", is_error=True)
+
+    def handle_register(self):
+        username = self.register_user_entry.get().strip()
+        password = self.register_pass_entry.get()
+
+        if not username or not password:
+            self.show_status("Por favor, llena todos los campos.", is_error=True)
+            return
+
+        if len(password) < 8:
+            self.show_status("La contraseña maestra debe tener al menos 8 caracteres.", is_error=True)
+            return
+
+        self.show_status("Registrando usuario en la API...")
+
+        try:
+            response = requests.post(
+                f"{API_BASE_URL}/register",
+                json={"username": username, "master_password": password},
+                timeout=15
+            )
+
+            if response.status_code == 201:
+                data = response.json()
+                clave_raw = data.get("recovery_key", "")
+                self.show_status("¡Usuario registrado con éxito! Ya puedes iniciar sesión.", is_error=False)
+                logger.info(f"Usuario '{username}' registrado correctamente vía API.")
+
+                msg = (
+                    f"Tu Clave de Recuperación es:\n\n{clave_raw}\n\n"
+                    "⚠️ IMPORTANTE:\nAnótala en un papel o lugar seguro. No la podrás volver a ver.\n"
+                    "La necesitarás para restablecer tu contraseña maestra si la olvidas."
+                )
+                messagebox.showinfo("Clave de Recuperación - Lockbox", msg, parent=self)
+
+                self.register_user_entry.delete(0, tk.END)
+                self.register_pass_entry.delete(0, tk.END)
+
+                self.tabview.set("Iniciar Sesión")
+                self.login_user_entry.delete(0, tk.END)
+                self.login_user_entry.insert(0, username)
+
+            elif response.status_code == 429:
+                self.show_status("Has superado el límite de registros por minuto. Espera un momento.", is_error=True)
+            else:
+                data = response.json() if response.headers.get("content-type") == "application/json" else {}
+                err_msg = data.get("error", "Error al registrar el usuario.")
+                self.show_status(err_msg, is_error=True)
+
+        except requests.exceptions.RequestException as err:
+            logger.error(f"Error de conexión en registro: {err}")
+            self.show_status("Error de conexión con el servidor API en Render.", is_error=True)
+
+    def mostrar_dashboard(self):
+        self.destroy_login_ui()
+        self.geometry("950x650")
+        self.resizable(True, True)
+        self.center_window()
+
+        self.dashboard_frame = DashboardFrame(
+            self,
+            username=self.username,
+            master_password=self.master_password,
+            on_logout=self.handle_logout
+        )
+        self.dashboard_frame.pack(fill="both", expand=True)
+
+    def handle_logout(self):
+        self.limpiar_portapapeles()
+        self.username = None
+        self.master_password = None
+
+        self.geometry("450x550")
+        self.resizable(False, False)
+        self.center_window()
+
+        self.setup_login_ui()
+        self.show_status("Sesión cerrada correctamente.", is_error=False)
+
+    def copiar_al_portapapeles(self, texto: str):
+        import pyperclip
+
+        if self._clipboard_timer:
+            self.after_cancel(self._clipboard_timer)
+            self._clipboard_timer = None
+
+        try:
+            pyperclip.copy(texto)
+            logger.info("Contraseña copiada al portapapeles.")
+        except Exception as e:
+            logger.error(f"Error al escribir en el portapapeles con pyperclip: {e}")
+
+        self._clipboard_timer = self.after(30000, lambda: self.limpiar_portapapeles(texto))
+
+    def limpiar_portapapeles(self, texto_copiado: str = None):
+        import pyperclip
+        try:
+            if texto_copiado is None or pyperclip.paste() == texto_copiado:
+                pyperclip.copy("")
+                logger.info("Portapapeles efímero limpiado automáticamente.")
+            else:
+                logger.info("El portapapeles fue modificado externamente; se omitió la limpieza.")
+        except Exception as e:
+            logger.error(f"Error al limpiar el portapapeles: {e}")
+
+        self._clipboard_timer = None
+
+
+if __name__ == "__main__":
+    app = App()
+    app.mainloop()
+</file>
+
+<file path="app_api.py">
+import logging
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+# Rate limiting para proteger rutas críticas contra fuerza bruta
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+# Middleware para leer la IP real del usuario detrás de un proxy (Render, Nginx, etc.)
+from werkzeug.middleware.proxy_fix import ProxyFix
+
+from app_db import (
+    get_db_session,
+    Usuario,
+    Credencial,
+    Categoria,
+    init_db
+)
+from seguridad import (
+    verificar_hash_maestro,
+    derivar_clave_fernet,
+    cifrar_contrasena,
+    descifrar_contrasena,
+    generar_hash_maestro,
+    generar_salt_derivacion,
+    generar_clave_recuperacion,
+    normalize_domain
+)
+
+# Inicialización de la aplicación Flask
+app = Flask(__name__)
+
+# Configurar Flask para leer la IP real del usuario detrás de Render u otro reverse proxy.
+# Sin esto, flask-limiter ve siempre la IP interna del proxy y el rate limit no funciona bien.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
+
+# Habilitar CORS para permitir que la extensión de Chrome haga peticiones al backend
+CORS(app)
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("app_api")
+
+# ==========================================
+# RATE LIMITER — Protección contra fuerza bruta
+# ==========================================
+# get_remote_address identifica al solicitante por su IP
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["200 per day", "50 per hour"],  # Límite global para rutas sin decorador propio
+    storage_uri="memory://",  # Contadores almacenados en RAM del servidor
+    strategy="fixed-window"   # Ventana fija: cuenta TODAS las peticiones (incluyendo errores 401/400)
+)
+
+# Asegurar que las tablas estén inicializadas al arrancar la API
+init_db()
+
+
+@app.route("/api/ping", methods=["GET"])
+def ping():
+    """Ruta para verificar que la API está viva y respondiendo."""
+    return jsonify({"status": "ok", "message": "Servidor del Gestor de Contraseñas activo"}), 200
+
+
+@app.route("/api/register", methods=["POST"])
+@limiter.limit("3 per minute")  # Máximo 3 registros por minuto desde la misma IP
+def register():
+    """
+    Registra un nuevo usuario.
+    Recibe JSON: { "username": "...", "master_password": "..." }
+    """
+    data = request.get_json() or {}
+    username = data.get("username", "").strip()
+    master_password = data.get("master_password", "").strip()
+
+    if not username or not master_password:
+        return jsonify({"error": "El nombre de usuario y la contraseña son requeridos"}), 400
+
+    with get_db_session() as session:
+        # Verificar si el usuario ya existe
+        usuario_existente = session.query(Usuario).filter_by(username=username).first()
+        if usuario_existente:
+            return jsonify({"error": "El usuario ya existe"}), 400
+
+        # Crear nuevo usuario con sus sales y hash maestro
+        hash_maestro = generar_hash_maestro(master_password)
+        salt_derivacion = generar_salt_derivacion()
+        clave_raw = generar_clave_recuperacion()
+        hash_recuperacion = generar_hash_maestro(clave_raw)
+
+        nuevo_usuario = Usuario(
+            username=username,
+            master_hash=hash_maestro,
+            salt_derivacion=salt_derivacion,
+            recovery_key_hash=hash_recuperacion
+        )
+        session.add(nuevo_usuario)
+
+    return jsonify({
+        "message": f"Usuario '{username}' registrado con éxito",
+        "recovery_key": clave_raw
+    }), 201
+
+
+@app.route("/api/login", methods=["POST"])
+@limiter.limit("5 per minute")  # Bloquea intentos de adivinar la contraseña maestra
+def login():
+    """
+    Autentica al usuario con su contraseña maestra.
+    Recibe JSON: { "username": "...", "master_password": "..." }
+    """
+    data = request.get_json() or {}
+    username = data.get("username", "").strip()
+    master_password = data.get("master_password", "").strip()
+
+    if not username or not master_password:
+        return jsonify({"error": "Faltan credenciales"}), 400
+
+    with get_db_session() as session:
+        usuario = session.query(Usuario).filter_by(username=username).first()
+        if not usuario:
+            return jsonify({"error": "Usuario o contraseña incorrectos"}), 401
+
+        # Verificar contraseña con Bcrypt
+        if not verificar_hash_maestro(master_password, usuario.master_hash):
+            return jsonify({"error": "Usuario o contraseña incorrectos"}), 401
+
+        return jsonify({
+            "message": "Autenticación exitosa",
+            "username": usuario.username
+        }), 200
+
+
+@app.route("/api/credentials", methods=["POST"])
+@limiter.limit("30 per minute", per_method=True)
+def get_credentials():
+    """
+    Obtiene y descifra las contraseñas del usuario, opcionalmente filtradas por query.
+    Recibe JSON: { "username": "...", "master_password": "...", "query": "..." (opcional) }
+    """
+    data = request.get_json() or {}
+    username = data.get("username", "").strip()
+    master_password = data.get("master_password", "").strip()
+    query = data.get("query", "").strip().lower()
+
+    if not username or not master_password:
+        return jsonify({"error": "Autenticación requerida"}), 400
+
+    with get_db_session() as session:
+        usuario = session.query(Usuario).filter_by(username=username).first()
+        if not usuario or not verificar_hash_maestro(master_password, usuario.master_hash):
+            return jsonify({"error": "Credenciales inválidas"}), 401
+
+        # Derivar clave para descifrar en memoria
+        clave_cifrado = derivar_clave_fernet(master_password, usuario.salt_derivacion)
+
+        credenciales_query = session.query(Credencial).filter(Credencial.usuario_id == usuario.id)
+
+        if query:
+            search_terms = [query]
+            clean_query = query.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
+            if clean_query not in search_terms:
+                search_terms.append(clean_query)
+            if "." in clean_query:
+                base_domain = clean_query.split(".")[0]
+                if len(base_domain) > 2 and base_domain not in search_terms:
+                    search_terms.append(base_domain)
+
+            from sqlalchemy import or_
+            filters = [Credencial.sitio_web.ilike(f"%{term}%") for term in search_terms]
+            filters.append(Credencial.login_user.ilike(f"%{query}%"))
+            credenciales_query = credenciales_query.filter(or_(*filters))
+
+        lista_credenciales = []
+        for cred in credenciales_query.all():
+            pass_descifrada = descifrar_contrasena(cred.password_cifrada, clave_cifrado)
+            lista_credenciales.append({
+                "id": str(cred.id),
+                "sitio_web": cred.sitio_web,
+                "login_user": cred.login_user,
+                "password": pass_descifrada,
+                "categoria": cred.categoria.nombre if cred.categoria else "Sin Categoría"
+            })
+
+        return jsonify({"credenciales": lista_credenciales}), 200
+
+
+@app.route("/api/credentials/search", methods=["GET", "POST"])
+@limiter.limit("30 per minute")
+def search_credentials():
+    """
+    Busca credenciales utilizando coincidencia inclusiva por FQDN y nombre base.
+    """
+    if request.method == "POST":
+        data = request.get_json() or {}
+        query = data.get("query", "").strip().lower()
+        username = data.get("username", "").strip()
+        master_password = data.get("master_password", "").strip()
+    else:
+        query = request.args.get("query", "").strip().lower()
+        username = request.args.get("username", "").strip()
+        master_password = request.args.get("master_password", "").strip()
+
+    if not username or not master_password:
+        return jsonify({"error": "Parámetros username y master_password son requeridos"}), 400
+
+    if not query:
+        return jsonify([])
+
+    with get_db_session() as session:
+        usuario = session.query(Usuario).filter_by(username=username).first()
+        if not usuario or not verificar_hash_maestro(master_password, usuario.master_hash):
+            return jsonify({"error": "Credenciales inválidas"}), 401
+
+        search_terms = [query]
+        clean_query = query.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
+        if clean_query not in search_terms:
+            search_terms.append(clean_query)
+        if "." in clean_query:
+            base_domain = clean_query.split(".")[0]
+            if len(base_domain) > 2 and base_domain not in search_terms:
+                search_terms.append(base_domain)
+
+        from sqlalchemy import or_
+        filters = [Credencial.sitio_web.ilike(f"%{term}%") for term in search_terms]
+        filters.append(Credencial.login_user.ilike(f"%{query}%"))
+
+        results = session.query(Credencial).filter(
+            Credencial.usuario_id == usuario.id,
+            or_(*filters)
+        ).all()
+
+        clave_cifrado = derivar_clave_fernet(master_password, usuario.salt_derivacion)
+        lista_resultados = []
+        for c in results:
+            pass_descifrada = descifrar_contrasena(c.password_cifrada, clave_cifrado)
+            lista_resultados.append({
+                "id": str(c.id),
+                "sitio_web": c.sitio_web,
+                "login_user": c.login_user,
+                "password": pass_descifrada,
+                "categoria": c.categoria.nombre if c.categoria else "Sin Categoría"
+            })
+
+        return jsonify(lista_resultados), 200
+
+
+
+
+@app.route("/api/credentials/add", methods=["POST"])
+@limiter.limit("10 per minute")  # Evita la inserción masiva automatizada de credenciales
+def add_credential():
+    """
+    Guarda una nueva contraseña encriptada en la base de datos.
+    Recibe JSON: { 
+        "username": "...", 
+        "master_password": "...", 
+        "sitio_web": "...", 
+        "login_user": "...", 
+        "password": "..." 
+    }
+    """
+    data = request.get_json() or {}
+    username = data.get("username", "").strip()
+    master_password = data.get("master_password", "").strip()
+    raw_sitio = data.get("sitio_web", "").strip()
+    login_user = data.get("login_user", "").strip()
+    password_guardar = data.get("password", "").strip()
+
+    sitio_web = normalize_domain(raw_sitio)
+
+    if not all([username, master_password, sitio_web, login_user, password_guardar]):
+        return jsonify({"error": "Todos los campos son obligatorios"}), 400
+
+    with get_db_session() as session:
+        usuario = session.query(Usuario).filter_by(username=username).first()
+        if not usuario or not verificar_hash_maestro(master_password, usuario.master_hash):
+            return jsonify({"error": "Credenciales inválidas"}), 401
+
+        # Derivar clave Fernet y cifrar la nueva contraseña
+        clave_cifrado = derivar_clave_fernet(master_password, usuario.salt_derivacion)
+        pass_cifrada = cifrar_contrasena(password_guardar, clave_cifrado)
+
+        nueva_cred = Credencial(
+            usuario_id=usuario.id,
+            sitio_web=sitio_web,
+            login_user=login_user,
+            password_cifrada=pass_cifrada
+        )
+        session.add(nueva_cred)
+
+        return jsonify({"message": f"Credencial para '{sitio_web}' guardada con éxito"}), 201
+
+# ==========================================
+# ELIMINAR CREDENCIAL
+# ==========================================
+@app.route('/api/credentials/delete', methods=['POST'])
+@limiter.limit("10 per minute")  # Previene eliminación masiva de credenciales
+def delete_credential():
+    try:
+        import uuid
+        data = request.json or {}
+        cred_id = data.get('id')
+        username = data.get('username')
+        master_password = data.get('master_password')
+
+        if not cred_id or not username or not master_password:
+            return jsonify({'error': 'Faltan parámetros requeridos'}), 400
+
+        try:
+            cred_uuid = uuid.UUID(cred_id)
+        except ValueError:
+            return jsonify({'error': 'ID de credencial inválido'}), 400
+
+        with get_db_session() as session:
+            usuario = session.query(Usuario).filter_by(username=username).first()
+            if not usuario or not verificar_hash_maestro(master_password, usuario.master_hash):
+                return jsonify({'error': 'Contraseña maestra incorrecta'}), 401
+
+            credencial = session.query(Credencial).filter_by(id=cred_uuid, usuario_id=usuario.id).first()
+            if not credencial:
+                return jsonify({'error': 'Credencial no encontrada'}), 404
+
+            session.delete(credencial)
+
+        return jsonify({'message': 'Credencial eliminada exitosamente'}), 200
+
+    except Exception as e:
+        logger.error(f"Error al eliminar: {str(e)}")
+        return jsonify({'error': f'Error interno: {str(e)}'}), 500
+
+
+# ==========================================
+# EDITAR CREDENCIAL
+# ==========================================
+@app.route('/api/credentials/update', methods=['POST'])
+@limiter.limit("10 per minute")  # Previene modificaciones masivas automatizadas
+def update_credential():
+    try:
+        import uuid
+        data = request.json or {}
+        cred_id = data.get('id')
+        username = data.get('username')
+        master_password = data.get('master_password')
+        sitio_web = data.get('sitio_web')
+        login_user = data.get('login_user')
+        new_password = data.get('password')
+
+        if not cred_id or not username or not master_password:
+            return jsonify({'error': 'Faltan parámetros requeridos'}), 400
+
+        try:
+            cred_uuid = uuid.UUID(cred_id)
+        except ValueError:
+            return jsonify({'error': 'ID de credencial inválido'}), 400
+
+        with get_db_session() as session:
+            usuario = session.query(Usuario).filter_by(username=username).first()
+            if not usuario or not verificar_hash_maestro(master_password, usuario.master_hash):
+                return jsonify({'error': 'Contraseña maestra incorrecta'}), 401
+
+            credencial = session.query(Credencial).filter_by(id=cred_uuid, usuario_id=usuario.id).first()
+            if not credencial:
+                return jsonify({'error': 'Credencial no encontrada'}), 404
+
+            if sitio_web is not None:
+                credencial.sitio_web = normalize_domain(sitio_web)
+            if login_user is not None:
+                credencial.login_user = login_user
+
+            if new_password:
+                clave_cifrado = derivar_clave_fernet(master_password, usuario.salt_derivacion)
+                pass_cifrada = cifrar_contrasena(new_password, clave_cifrado)
+                credencial.password_cifrada = pass_cifrada
+
+        return jsonify({'message': 'Credencial actualizada con éxito'}), 200
+
+    except Exception as e:
+        logger.error(f"Error al actualizar: {str(e)}")
+        return jsonify({'error': f'Error interno: {str(e)}'}), 500
+
+
+# ==========================================
+# BUSCAR CATEGORÍAS
+# ==========================================
+@app.route('/api/categories', methods=['GET'])
+def get_categories():
+    """Obtiene todas las categorías disponibles."""
+    try:
+        with get_db_session() as session:
+            categorias = session.query(Categoria).order_by(Categoria.nombre).all()
+            return jsonify({
+                'categories': [{"id": str(c.id), "nombre": c.nombre} for c in categorias]
+            }), 200
+    except Exception as e:
+        logger.error(f"Error al obtener categorías: {str(e)}")
+        return jsonify({'error': 'Error interno'}), 500
+
+
+# ==========================================
+# RESTABLECER CONTRASEÑA
+# ==========================================
+@app.route('/api/recover', methods=['POST'])
+@limiter.limit("3 per minute")
+def recover_password():
+    """
+    Restablece la contraseña maestra de un usuario usando su clave de recuperación.
+    Recibe JSON: { "username": "...", "recovery_key": "...", "new_master_password": "..." }
+    """
+    data = request.get_json() or {}
+    username = data.get("username", "").strip()
+    recovery_key = data.get("recovery_key", "").strip()
+    new_master_password = data.get("new_master_password", "").strip()
+
+    if not username or not recovery_key or not new_master_password:
+        return jsonify({"error": "Todos los campos son obligatorios"}), 400
+
+    if len(new_master_password) < 8:
+        return jsonify({"error": "La nueva contraseña maestra debe tener al menos 8 caracteres"}), 400
+
+    with get_db_session() as session:
+        usuario = session.query(Usuario).filter_by(username=username).first()
+        if not usuario:
+            return jsonify({"error": "El usuario no existe"}), 404
+
+        if not usuario.recovery_key_hash:
+            return jsonify({"error": "El usuario no tiene una clave de recuperación configurada"}), 400
+
+        if not verificar_hash_maestro(recovery_key, usuario.recovery_key_hash):
+            return jsonify({"error": "La clave de recuperación es incorrecta"}), 401
+
+        nuevo_salt = generar_salt_derivacion()
+        nuevo_hash = generar_hash_maestro(new_master_password)
+
+        usuario.master_hash = nuevo_hash
+        usuario.salt_derivacion = nuevo_salt
+
+    return jsonify({"message": "Contraseña maestra restablecida con éxito"}), 200
+
+
+# ==========================================
+# MANEJADOR DE ERROR 429 — Rate Limit Superado
+# ==========================================
+@app.errorhandler(429)
+def ratelimit_handler(e):
+    """Responde de forma limpia cuando un cliente supera el límite de peticiones."""
+    return jsonify({
+        "error": "Has superado el límite de intentos. Por favor, espera un momento y vuelve a intentarlo."
+    }), 429
+
+
+if __name__ == "__main__":
+    print("🚀 Servidor API iniciando en http://127.0.0.1:5000")
+    app.run(debug=True, port=5000)
+</file>
+
+</files>

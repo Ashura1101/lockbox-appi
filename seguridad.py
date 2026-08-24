@@ -175,3 +175,40 @@ def generar_clave_recuperacion() -> str:
     return f"LOCK-{bloque1}-{bloque2}"
 
 
+def normalize_domain(input_string: str) -> str:
+    """
+    Normaliza entradas de sitios web a un dominio estándar.
+    Ej: 'youtube' -> 'youtube.com', 'https://www.facebook.com/login' -> 'facebook.com'
+    """
+    from urllib.parse import urlparse
+
+    if not input_string:
+        return ""
+
+    cleaned = input_string.strip().lower()
+
+    if cleaned.startswith("localhost") or cleaned.startswith("127.0.0.1"):
+        return cleaned.split("/")[0]
+
+    # 1. Si es un nombre plano sin puntos, protocolo ni puerto (ej: 'youtube')
+    if "." not in cleaned and "://" not in cleaned and ":" not in cleaned:
+        return f"{cleaned}.com"
+
+    # 2. Si no tiene protocolo, agregarlo temporalmente para parsear correctamente
+    if not cleaned.startswith("http://") and not cleaned.startswith("https://"):
+        cleaned = "https://" + cleaned
+
+    try:
+        parsed = urlparse(cleaned)
+        domain = parsed.netloc or parsed.path
+        # Remover puerto si existe (ej. localhost:8080) y el prefijo www.
+        domain = domain.split(":")[0]
+        if domain.startswith("www."):
+            domain = domain[4:]
+        return domain
+    except Exception:
+        return input_string.strip().lower()
+
+
+
+

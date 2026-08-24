@@ -133,13 +133,16 @@ document.addEventListener("DOMContentLoaded", async () => {
       resultsContainer.innerHTML = "";
 
       try {
+        const payload = {
+          username: data.currentUser,
+          master_password: data.masterPassword
+        };
+        if (querySite) payload.query = querySite;
+
         const res = await fetch(`${API_URL}/credentials`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            username: data.currentUser,
-            master_password: data.masterPassword
-          })
+          body: JSON.stringify(payload)
         });
 
         // Siempre leer el JSON primero (sea error o éxito)
@@ -155,10 +158,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           showStatus("", "hidden");
           let credenciales = result.credenciales || [];
           if (querySite) {
-            credenciales = credenciales.filter(c =>
-              c.sitio_web.toLowerCase().includes(querySite) ||
-              c.login_user.toLowerCase().includes(querySite)
-            );
+            credenciales = filterCredentialsForCurrentSite(credenciales, querySite);
           }
           renderResults(credenciales);
         } else {
@@ -180,7 +180,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         return;
       }
 
-      const sitioWeb = addSiteInput.value.trim();
+      const sitioWeb = normalizeDomain(addSiteInput.value);
       const loginUser = addUserInput.value.trim();
       const password = addPassInput.value.trim();
 
@@ -212,6 +212,81 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     });
   });
+
+  /**
+   * Normaliza cualquier entrada de sitio web a un dominio o URL estándar.
+   * Ejemplos: "youtube" -> "youtube.com", "http://www.youtube.com" -> "youtube.com"
+   */
+  function normalizeDomain(input) {
+    if (!input || typeof input !== "string") return "";
+    let trimmed = input.trim().toLowerCase();
+
+    if (trimmed.startsWith("localhost") || trimmed.startsWith("127.0.0.1")) {
+      return trimmed.split("/")[0];
+    }
+
+    if (!trimmed.includes(".") && !trimmed.includes("://") && !trimmed.includes(":")) {
+      return `${trimmed}.com`;
+    }
+
+    try {
+      let urlToParse = trimmed;
+      if (!urlToParse.startsWith("http://") && !urlToParse.startsWith("https://")) {
+        urlToParse = "https://" + urlToParse;
+      }
+      const parsed = new URL(urlToParse);
+      return parsed.hostname.replace(/^www\./, "");
+    } catch (e) {
+      return trimmed.replace(/^www\./, "");
+    }
+  }
+
+  /**
+   * Extrae las variantes de un término/URL para realizar una búsqueda inclusiva.
+   * Ejemplo: "https://www.youtube.com/watch?v=..." -> { hostname: "youtube.com", domainBase: "youtube" }
+   */
+  function getSearchTermsFromUrl(urlString) {
+    try {
+      const urlObj = new URL(urlString);
+      let hostname = urlObj.hostname.toLowerCase().replace(/^www\./, "");
+      let domainBase = hostname.split(".")[0];
+      return { hostname, domainBase };
+    } catch (e) {
+      let clean = urlString.toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0];
+      let domainBase = clean.split(".")[0];
+      return { hostname: clean, domainBase };
+    }
+  }
+
+  /**
+   * Lógica de filtrado en el cliente/popup con coincidencia fuerte y por nombre base
+   */
+  function filterCredentialsForCurrentSite(allCredentials, currentUrlOrDomain) {
+    if (!currentUrlOrDomain) return allCredentials;
+
+    const { hostname, domainBase } = getSearchTermsFromUrl(currentUrlOrDomain);
+    const rawQuery = currentUrlOrDomain.toLowerCase().trim();
+
+    return allCredentials.filter(cred => {
+      if (!cred) return false;
+
+      const site = (cred.sitio_web || "").toLowerCase().trim();
+      const user = (cred.login_user || "").toLowerCase().trim();
+
+      // Coincidencia por usuario
+      if (user && user.includes(rawQuery)) return true;
+
+      if (!site) return false;
+
+      // Coincidencia 1: Exacta o parcial por FQDN ("youtube.com") o término directo
+      const matchesHostname = site.includes(hostname) || hostname.includes(site) || site.includes(rawQuery) || rawQuery.includes(site);
+
+      // Coincidencia 2: Coincidencia por nombre base ("youtube")
+      const matchesBase = (domainBase && domainBase.length > 2) && (site.includes(domainBase) || domainBase.includes(site));
+
+      return matchesHostname || matchesBase;
+    });
+  }
 
   // Funciones Auxiliares
   function showMainView(username) {
@@ -326,6 +401,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       // Evento: Editar
       card.querySelector(".btn-edit-item").addEventListener("click", async () => {
+        const nuevoSitio = prompt("Editar sitio web:", c.sitio_web);
+        if (nuevoSitio === null) return;
+        const sitioNormalizado = normalizeDomain(nuevoSitio);
+
         const nuevoUsuario = prompt("Editar usuario/email:", c.login_user);
         if (nuevoUsuario === null) return;
 
@@ -343,7 +422,7 @@ document.addEventListener("DOMContentLoaded", async () => {
                 id: c.id,
                 username: data.currentUser,
                 master_password: data.masterPassword,
-                sitio_web: c.sitio_web,
+                sitio_web: sitioNormalizado,
                 login_user: nuevoUsuario,
                 password: nuevaPassword
               })

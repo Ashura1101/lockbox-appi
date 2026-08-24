@@ -8,7 +8,7 @@ import requests
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("lockbox_theme.json")
 
-from seguridad import generar_contrasena_segura
+from seguridad import generar_contrasena_segura, normalize_domain
 
 # URL de la API desplegada en Render
 API_BASE_URL = "https://lockbox-appi.onrender.com/api"
@@ -215,7 +215,7 @@ class AgregarCredencialWindow(ctk.CTkToplevel):
         self.check_show_pass.select()
 
     def guardar_credencial(self):
-        sitio = self.entry_sitio.get().strip()
+        sitio = normalize_domain(self.entry_sitio.get())
         usuario = self.entry_usuario.get().strip()
         password = self.entry_password.get()
 
@@ -411,7 +411,7 @@ class EditarCredencialWindow(ctk.CTkToplevel):
         self.entry_usuario.insert(0, login_user_actual)
         self.entry_usuario.pack(pady=8)
 
-        self.pass_row = ctk.CTkFrame(self, fg_color="transparent")
+        self.pass_row = ctk.CTkFrame(self, fg_color="transparent")  
         self.pass_row.pack(pady=8)
 
         self.entry_password = ctk.CTkEntry(
@@ -518,7 +518,7 @@ class EditarCredencialWindow(ctk.CTkToplevel):
         self.entry_password.configure(show="" if self.show_pass_var.get() == "on" else "*")
 
     def guardar_cambios(self):
-        sitio = self.entry_sitio.get().strip()
+        sitio = normalize_domain(self.entry_sitio.get())
         usuario = self.entry_usuario.get().strip()
         nueva_pass = self.entry_password.get()
 
