@@ -47,11 +47,10 @@ app = Flask(__name__)
 # Sin esto, flask-limiter ve siempre la IP interna del proxy y el rate limit no funciona bien.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
-# Configuración de la extensión de Chrome para CORS
-EXTENSION_ID = os.getenv("akahlajpbbkppfnijfoelpgdelfaikkl", "akahlajpbbkppfnijfoelpgdelfaikkl")
+# Configuración estricta de CORS
+EXTENSION_ID = os.getenv("EXTENSION_ID", "akahlajpbbkppfnijfoelpgdelfaikkl")
 ALLOWED_ORIGIN = f"chrome-extension://{EXTENSION_ID}"
 
-# Configuración de CORS restringido (sin fallback abierto)
 CORS(app, resources={r"/api/*": {"origins": [ALLOWED_ORIGIN]}})
 
 logging.basicConfig(level=logging.INFO)
