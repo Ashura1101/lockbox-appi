@@ -21,8 +21,24 @@ from seguridad import (
     descifrar_contrasena,
     generar_hash_maestro,
     generar_salt_derivacion,
-    generar_clave_recuperacion
+    generar_clave_recuperacion,
+    normalize_domain
 )
+import os
+import sys
+from dotenv import load_dotenv
+
+# Cargar variables de entorno desde .env
+load_dotenv()
+
+# Lista de variables obligatorias
+REQUIRED_ENV_VARS = ["DATABASE_URL", "JWT_SECRET_KEY"]
+
+# Verificación Fail-Fast
+for var in REQUIRED_ENV_VARS:
+    if not os.getenv(var):
+        print(f"[ERROR CRÍTICO] La variable de entorno '{var}' no está definida. Deteniendo el servidor.")
+        sys.exit(1)
 
 # Inicialización de la aplicación Flask
 app = Flask(__name__)
@@ -129,15 +145,16 @@ def login():
 
 
 @app.route("/api/credentials", methods=["POST"])
-@limiter.limit("30 per minute", per_method=True)  # 🧪 TEMPORAL — Restaurar a "30 per minute" después
+@limiter.limit("30 per minute", per_method=True)
 def get_credentials():
     """
-    Obtiene y descifra todas las contraseñas del usuario.
-    Recibe JSON: { "username": "...", "master_password": "..." }
+    Obtiene y descifra las contraseñas del usuario, opcionalmente filtradas por query.
+    Recibe JSON: { "username": "...", "master_password": "...", "query": "..." (opcional) }
     """
     data = request.get_json() or {}
     username = data.get("username", "").strip()
     master_password = data.get("master_password", "").strip()
+    query = data.get("query", "").strip().lower()
 
     if not username or not master_password:
         return jsonify({"error": "Autenticación requerida"}), 400
@@ -150,8 +167,25 @@ def get_credentials():
         # Derivar clave para descifrar en memoria
         clave_cifrado = derivar_clave_fernet(master_password, usuario.salt_derivacion)
 
+        credenciales_query = session.query(Credencial).filter(Credencial.usuario_id == usuario.id)
+
+        if query:
+            search_terms = [query]
+            clean_query = query.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
+            if clean_query not in search_terms:
+                search_terms.append(clean_query)
+            if "." in clean_query:
+                base_domain = clean_query.split(".")[0]
+                if len(base_domain) > 2 and base_domain not in search_terms:
+                    search_terms.append(base_domain)
+
+            from sqlalchemy import or_
+            filters = [Credencial.sitio_web.ilike(f"%{term}%") for term in search_terms]
+            filters.append(Credencial.login_user.ilike(f"%{query}%"))
+            credenciales_query = credenciales_query.filter(or_(*filters))
+
         lista_credenciales = []
-        for cred in usuario.credenciales:
+        for cred in credenciales_query.all():
             pass_descifrada = descifrar_contrasena(cred.password_cifrada, clave_cifrado)
             lista_credenciales.append({
                 "id": str(cred.id),
@@ -162,6 +196,68 @@ def get_credentials():
             })
 
         return jsonify({"credenciales": lista_credenciales}), 200
+
+
+@app.route("/api/credentials/search", methods=["GET", "POST"])
+@limiter.limit("30 per minute")
+def search_credentials():
+    """
+    Busca credenciales utilizando coincidencia inclusiva por FQDN y nombre base.
+    """
+    if request.method == "POST":
+        data = request.get_json() or {}
+        query = data.get("query", "").strip().lower()
+        username = data.get("username", "").strip()
+        master_password = data.get("master_password", "").strip()
+    else:
+        query = request.args.get("query", "").strip().lower()
+        username = request.args.get("username", "").strip()
+        master_password = request.args.get("master_password", "").strip()
+
+    if not username or not master_password:
+        return jsonify({"error": "Parámetros username y master_password son requeridos"}), 400
+
+    if not query:
+        return jsonify([])
+
+    with get_db_session() as session:
+        usuario = session.query(Usuario).filter_by(username=username).first()
+        if not usuario or not verificar_hash_maestro(master_password, usuario.master_hash):
+            return jsonify({"error": "Credenciales inválidas"}), 401
+
+        search_terms = [query]
+        clean_query = query.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
+        if clean_query not in search_terms:
+            search_terms.append(clean_query)
+        if "." in clean_query:
+            base_domain = clean_query.split(".")[0]
+            if len(base_domain) > 2 and base_domain not in search_terms:
+                search_terms.append(base_domain)
+
+        from sqlalchemy import or_
+        filters = [Credencial.sitio_web.ilike(f"%{term}%") for term in search_terms]
+        filters.append(Credencial.login_user.ilike(f"%{query}%"))
+
+        results = session.query(Credencial).filter(
+            Credencial.usuario_id == usuario.id,
+            or_(*filters)
+        ).all()
+
+        clave_cifrado = derivar_clave_fernet(master_password, usuario.salt_derivacion)
+        lista_resultados = []
+        for c in results:
+            pass_descifrada = descifrar_contrasena(c.password_cifrada, clave_cifrado)
+            lista_resultados.append({
+                "id": str(c.id),
+                "sitio_web": c.sitio_web,
+                "login_user": c.login_user,
+                "password": pass_descifrada,
+                "categoria": c.categoria.nombre if c.categoria else "Sin Categoría"
+            })
+
+        return jsonify(lista_resultados), 200
+
+
 
 
 @app.route("/api/credentials/add", methods=["POST"])
@@ -180,9 +276,11 @@ def add_credential():
     data = request.get_json() or {}
     username = data.get("username", "").strip()
     master_password = data.get("master_password", "").strip()
-    sitio_web = data.get("sitio_web", "").strip()
+    raw_sitio = data.get("sitio_web", "").strip()
     login_user = data.get("login_user", "").strip()
     password_guardar = data.get("password", "").strip()
+
+    sitio_web = normalize_domain(raw_sitio)
 
     if not all([username, master_password, sitio_web, login_user, password_guardar]):
         return jsonify({"error": "Todos los campos son obligatorios"}), 400
@@ -279,7 +377,7 @@ def update_credential():
                 return jsonify({'error': 'Credencial no encontrada'}), 404
 
             if sitio_web is not None:
-                credencial.sitio_web = sitio_web
+                credencial.sitio_web = normalize_domain(sitio_web)
             if login_user is not None:
                 credencial.login_user = login_user
 
