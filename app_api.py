@@ -48,14 +48,11 @@ app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
 # Configuración de la extensión de Chrome para CORS
-EXTENSION_ID = os.getenv("EXTENSION_ID", "TU_EXTENSION_ID_AQUI")
+EXTENSION_ID = os.getenv("akahlajpbbkppfnijfoelpgdelfaikkl", "akahlajpbbkppfnijfoelpgdelfaikkl")
 ALLOWED_ORIGIN = f"chrome-extension://{EXTENSION_ID}"
 
-# 1. Configuración de CORS restringido
-if EXTENSION_ID and EXTENSION_ID != "TU_EXTENSION_ID_AQUI":
-    CORS(app, origins=[ALLOWED_ORIGIN])
-else:
-    CORS(app)
+# Configuración de CORS restringido (sin fallback abierto)
+CORS(app, resources={r"/api/*": {"origins": [ALLOWED_ORIGIN]}})
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app_api")
