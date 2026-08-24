@@ -7,12 +7,15 @@ from flask_limiter.util import get_remote_address
 # Middleware para leer la IP real del usuario detrás de un proxy (Render, Nginx, etc.)
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+from functools import wraps
 from app_db import (
     get_db_session,
     Usuario,
     Credencial,
     Categoria,
-    init_db
+    init_db,
+    revocar_jti,
+    es_jti_revocado
 )
 from seguridad import (
     verificar_hash_maestro,
@@ -22,7 +25,9 @@ from seguridad import (
     generar_hash_maestro,
     generar_salt_derivacion,
     generar_clave_recuperacion,
-    normalize_domain
+    normalize_domain,
+    generar_par_tokens,
+    verificar_token
 )
 import os
 import sys
@@ -80,6 +85,31 @@ def apply_security_headers(response):
     return response
 
 
+# ==========================================
+# DECORADOR AUTENTICACIÓN JWT Y LISTA NEGRA
+# ==========================================
+def token_requerido(f):
+    @wraps(f)
+    def decorator(*args, **kwargs):
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            return jsonify({"error": "Token de acceso requerido"}), 401
+
+        token = auth_header.split(" ")[1]
+        payload, error = verificar_token(token, expected_type="access")
+
+        if error:
+            return jsonify({"error": error}), 401
+
+        if es_jti_revocado(payload["jti"]):
+            return jsonify({"error": "El token ha sido revocado"}), 401
+
+        request.user_id = payload["sub"]
+        request.token_jti = payload["jti"]
+        return f(*args, **kwargs)
+    return decorator
+
+
 # Asegurar que las tablas estén inicializadas al arrancar la API
 init_db()
 
@@ -88,6 +118,50 @@ init_db()
 def ping():
     """Ruta para verificar que la API está viva y respondiendo."""
     return jsonify({"status": "ok", "message": "Servidor del Gestor de Contraseñas activo"}), 200
+
+
+# Endpoint: Refresh Token Rotativo
+@app.route("/api/auth/refresh", methods=["POST"])
+@limiter.limit("10 per minute")
+def refresh():
+    data = request.get_json() or {}
+    refresh_token = data.get("refresh_token")
+
+    if not refresh_token:
+        return jsonify({"error": "refresh_token requerido"}), 400
+
+    payload, error = verificar_token(refresh_token, expected_type="refresh")
+    if error or es_jti_revocado(payload["jti"]):
+        return jsonify({"error": "Refresh token inválido o revocado"}), 401
+
+    # Rotación obligatoria: revocar el refresh_token usado
+    revocar_jti(payload["jti"])
+
+    # Emitir nuevo par de tokens
+    new_access, new_refresh, _ = generar_par_tokens(payload["sub"])
+    return jsonify({
+        "access_token": new_access,
+        "refresh_token": new_refresh
+    }), 200
+
+
+# Endpoint: Logout / Revocación
+@app.route("/api/auth/logout", methods=["POST"])
+@token_requerido
+def logout():
+    data = request.get_json() or {}
+    refresh_token = data.get("refresh_token")
+
+    # Revocar el access_token actual
+    revocar_jti(request.token_jti)
+
+    # Revocar el refresh_token asociado si se envía
+    if refresh_token:
+        payload, _ = verificar_token(refresh_token, expected_type="refresh")
+        if payload:
+            revocar_jti(payload["jti"])
+
+    return jsonify({"mensaje": "Sesión cerrada correctamente"}), 200
 
 
 @app.route("/api/register", methods=["POST"])
@@ -153,8 +227,13 @@ def login():
         if not verificar_hash_maestro(master_password, usuario.master_hash):
             return jsonify({"error": "Usuario o contraseña incorrectos"}), 401
 
+        # Generar pareja de tokens JWT (Access + Refresh)
+        access_token, refresh_token, _ = generar_par_tokens(str(usuario.id))
+
         return jsonify({
             "message": "Autenticación exitosa",
+            "access_token": access_token,
+            "refresh_token": refresh_token,
             "username": usuario.username
         }), 200
 

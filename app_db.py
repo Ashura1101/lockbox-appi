@@ -209,6 +209,50 @@ class Credencial(Base):
         return f"<Credencial(sitio_web={self.sitio_web}, login_user={self.login_user})>"
 
 
+class RevokedToken(Base):
+    """
+    Modelo que representa la tabla de tokens revocados (lista negra de JTI).
+    """
+    __tablename__ = "revoked_tokens"
+
+    jti: Mapped[str] = mapped_column(
+        String(255),
+        primary_key=True,
+        index=True
+    )
+    revoked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=func.now(),
+        nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<RevokedToken(jti={self.jti})>"
+
+
+def revocar_jti(jti: str):
+    """Agrega un JTI a la lista negra para invalidarlo de inmediato."""
+    try:
+        with get_db_session() as session:
+            existente = session.query(RevokedToken).filter_by(jti=jti).first()
+            if not existente:
+                nuevo = RevokedToken(jti=jti)
+                session.add(nuevo)
+    except Exception as e:
+        logger.error(f"Error al revocar JTI '{jti}': {e}")
+
+
+def es_jti_revocado(jti: str) -> bool:
+    """Consulta si un JTI ya fue revocado."""
+    try:
+        with get_db_session() as session:
+            res = session.query(RevokedToken).filter_by(jti=jti).first()
+            return res is not None
+    except Exception as e:
+        logger.error(f"Error al consultar JTI revocado '{jti}': {e}")
+        return False
+
+
 @contextmanager
 def get_db_session() -> Generator[Session, None, None]:
     """

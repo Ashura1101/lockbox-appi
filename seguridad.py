@@ -1,12 +1,19 @@
 import os
+import uuid
 import base64
 import bcrypt
 import logging
+from datetime import datetime, timedelta, timezone
+import jwt
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 logger = logging.getLogger("seguridad")
+
+JWT_SECRET = os.getenv("JWT_SECRET_KEY", "CLAVE_ULTRA_SECRETA_CAMBIAR_EN_PROD")
+ALGORITHM = "HS256"
+
 
 def generar_hash_maestro(password_maestra: str) -> str:
     """
@@ -208,6 +215,54 @@ def normalize_domain(input_string: str) -> str:
         return domain
     except Exception:
         return input_string.strip().lower()
+
+
+def generar_par_tokens(user_id: str):
+    """Genera un access_token (15 min) y un refresh_token (7 días) con claims estrictos."""
+    ahora = datetime.now(timezone.utc)
+    
+    # Payload Access Token
+    access_payload = {
+        "sub": str(user_id),
+        "iat": ahora,
+        "exp": ahora + timedelta(minutes=15),
+        "jti": str(uuid.uuid4()),
+        "type": "access"
+    }
+    
+    # Payload Refresh Token
+    refresh_payload = {
+        "sub": str(user_id),
+        "iat": ahora,
+        "exp": ahora + timedelta(days=7),
+        "jti": str(uuid.uuid4()),
+        "type": "refresh"
+    }
+    
+    access_token = jwt.encode(access_payload, JWT_SECRET, algorithm=ALGORITHM)
+    refresh_token = jwt.encode(refresh_payload, JWT_SECRET, algorithm=ALGORITHM)
+    
+    return access_token, refresh_token, refresh_payload["jti"]
+
+def verificar_token(token: str, expected_type: str = "access"):
+    """
+    Decodifica el JWT forzando el algoritmo HS256 y valida:
+    - Expiración (exp)
+    - Tipo de token (access vs refresh)
+    """
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
+        
+        # Validar tipo de token strictly
+        if payload.get("type") != expected_type:
+            return None, f"Tipo de token inválido. Se esperaba '{expected_type}'."
+            
+        return payload, None
+    except jwt.ExpiredSignatureError:
+        return None, "El token ha expirado."
+    except jwt.InvalidTokenError:
+        return None, "Token inválido o manipulado."
+
 
 
 
