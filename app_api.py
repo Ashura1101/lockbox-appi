@@ -47,8 +47,15 @@ app = Flask(__name__)
 # Sin esto, flask-limiter ve siempre la IP interna del proxy y el rate limit no funciona bien.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
-# Habilitar CORS para permitir que la extensión de Chrome haga peticiones al backend
-CORS(app)
+# Configuración de la extensión de Chrome para CORS
+EXTENSION_ID = os.getenv("EXTENSION_ID", "TU_EXTENSION_ID_AQUI")
+ALLOWED_ORIGIN = f"chrome-extension://{EXTENSION_ID}"
+
+# 1. Configuración de CORS restringido
+if EXTENSION_ID and EXTENSION_ID != "TU_EXTENSION_ID_AQUI":
+    CORS(app, origins=[ALLOWED_ORIGIN])
+else:
+    CORS(app)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app_api")
@@ -60,10 +67,22 @@ logger = logging.getLogger("app_api")
 limiter = Limiter(
     get_remote_address,
     app=app,
-    default_limits=["200 per day", "50 per hour"],  # Límite global para rutas sin decorador propio
-    storage_uri="memory://",  # Contadores almacenados en RAM del servidor
-    strategy="fixed-window"   # Ventana fija: cuenta TODAS las peticiones (incluyendo errores 401/400)
+    default_limits=["60 per minute"],  # Límite global por minuto por defecto
+    storage_uri="memory://",            # Contadores almacenados en RAM del servidor
+    strategy="fixed-window"             # Ventana fija
 )
+
+
+# ==========================================
+# ENCABEZADOS DE SEGURIDAD HTTP
+# ==========================================
+@app.after_request
+def apply_security_headers(response):
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Content-Security-Policy'] = "default-src 'none'"
+    return response
+
 
 # Asegurar que las tablas estén inicializadas al arrancar la API
 init_db()
