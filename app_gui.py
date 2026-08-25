@@ -21,6 +21,28 @@ logging.basicConfig(
 logger = logging.getLogger("app_gui")
 
 
+def copiar_contrasena_segura(root_window, texto_secreto):
+    """Copia una contraseña al portapapeles y programa su borrado automático tras 30 segundos."""
+    try:
+        root_window.clipboard_clear()
+        root_window.clipboard_append(texto_secreto)
+        root_window.update()
+        root_window.after(30000, lambda: _limpiar_portapapeles(root_window, texto_secreto))
+    except Exception as e:
+        logger.error(f"Error al escribir en el portapapeles: {e}")
+
+
+def _limpiar_portapapeles(root_window, texto_copiado):
+    """Borra el portapapeles si la contraseña actual coincide con la que fue copiada."""
+    try:
+        if root_window.clipboard_get() == texto_copiado:
+            root_window.clipboard_clear()
+            root_window.update()
+            logger.info("Portapapeles efímero limpiado automáticamente tras 30 segundos.")
+    except Exception:
+        pass  # El portapapeles ya estaba vacío o fue modificado por el usuario
+
+
 def obtener_categorias_api():
     """Consulta la API en Render para obtener las categorías disponibles."""
     try:
@@ -960,7 +982,7 @@ class DashboardFrame(ctk.CTkFrame):
 
     def copiar_contrasena(self, password: str, boton: ctk.CTkButton):
         try:
-            self.parent.copiar_al_portapapeles(password)
+            copiar_contrasena_segura(self.winfo_toplevel(), password)
             boton.configure(text="¡Copiada!", fg_color="#059669", state="disabled")
             self.after(3000, lambda: boton.configure(text="🔑 Clave", fg_color="#334155", state="normal"))
             self.mostrar_notificacion_temporal("¡Contraseña copiada al portapapeles! Se limpiará en 30 segundos.")

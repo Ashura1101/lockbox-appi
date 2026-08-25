@@ -89,6 +89,13 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       if (response.ok) {
         showStatus("", "hidden");
+        // Almacenar tokens en memoria volátil de sesión (se borra automáticamente al cerrar el navegador)
+        if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.session) {
+          chrome.storage.session.set({
+            accessToken: resData.access_token,
+            refreshToken: resData.refresh_token
+          });
+        }
         chrome.storage.local.set({ currentUser: username, masterPassword: masterPassword }, () => {
           showMainView(username);
         });
@@ -102,6 +109,9 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // 3. Evento de Cerrar Sesión
   btnLogout.addEventListener("click", () => {
+    if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.session) {
+      chrome.storage.session.remove(["accessToken", "refreshToken"]);
+    }
     chrome.storage.local.remove(["currentUser", "masterPassword"], () => {
       showLoginView();
     });
@@ -212,6 +222,27 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     });
   });
+
+  /**
+   * Copia texto al portapapeles y programa autolimpieza en 30 segundos.
+   */
+  function copiarAlPortapapeles(texto) {
+    if (!navigator.clipboard) return;
+    navigator.clipboard.writeText(texto).then(() => {
+      showStatus("¡Contraseña copiada! Se limpiará en 30s.", "success");
+      setTimeout(async () => {
+        try {
+          const textoActual = await navigator.clipboard.readText();
+          if (textoActual === texto) {
+            await navigator.clipboard.writeText("");
+            console.log("Portapapeles efímero limpiado automáticamente por seguridad.");
+          }
+        } catch (e) {
+          // Si el documento perdió foco o permisos de lectura
+        }
+      }, 30000);
+    });
+  }
 
   /**
    * Normaliza cualquier entrada de sitio web a un dominio o URL estándar.
@@ -355,11 +386,9 @@ document.addEventListener("DOMContentLoaded", async () => {
         </button>
       `;
 
-      // Evento: Copiar
+      // Evento: Copiar con autolimpieza efímera en 30 segundos
       card.querySelector(".btn-copy-item").addEventListener("click", () => {
-        navigator.clipboard.writeText(c.password);
-        showStatus("¡Contraseña copiada!", "success");
-        setTimeout(() => showStatus("", "hidden"), 2000);
+        copiarAlPortapapeles(c.password);
       });
 
       // Evento: Auto-llenar

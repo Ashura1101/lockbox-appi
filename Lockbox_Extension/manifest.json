@@ -1,18 +1,18 @@
 {
   "manifest_version": 3,
-  "name": "LOCKBOX",
+  "name": "Lockbox Password Manager",
   "version": "1.0",
   "description": "Extensión de Chrome para el Gestor de Contraseñas LOCKBOX",
   "permissions": [
-    "activeTab",
-    "tabs",
-    "clipboardWrite",
     "storage",
+    "clipboardWrite",
+    "activeTab",
     "scripting"
   ],
   "host_permissions": [
-    "http://127.0.0.1:8000/*",
-    "<all_urls>"
+    "https://lockbox-appi.onrender.com/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
   ],
   "action": {
     "default_popup": "popup.html"
