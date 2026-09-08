@@ -1,5 +1,108 @@
 const API_URL = "https://lockbox-appi.onrender.com/api";
 
+// ==========================================
+// MÓDULO CRIPTOGRÁFICO NATIVO (Zero-Knowledge)
+// ==========================================
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
+// Convertidores auxiliares Hexadecimal <-> Uint8Array
+function bytesToHex(bytes) {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function hexToBytes(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+  }
+  return bytes;
+}
+
+/**
+ * Deriva dos claves a partir de la contraseña maestra:
+ * 1. aesKey: Clave local para cifrar/descifrar (NUNCA SE ENVÍA).
+ * 2. authHashHex: Token que se envía al servidor para iniciar sesión.
+ */
+async function deriveKeys(masterPassword, saltHex) {
+  const salt = hexToBytes(saltHex);
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(masterPassword),
+    "PBKDF2",
+    false,
+    ["deriveBits", "deriveKey"]
+  );
+
+  // Clave local para Cifrado/Descifrado (AES-GCM 256-bit)
+  const aesKey = await crypto.subtle.deriveKey(
+    {
+      name: "PBKDF2",
+      salt: salt,
+      iterations: 600000, // Recomendación OWASP
+      hash: "SHA-256"
+    },
+    keyMaterial,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+
+  // Hash de autenticación para el servidor
+  const authBits = await crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      salt: encoder.encode("auth_" + saltHex),
+      iterations: 100000,
+      hash: "SHA-256"
+    },
+    keyMaterial,
+    256
+  );
+
+  return {
+    aesKey: aesKey,
+    authHashHex: bytesToHex(new Uint8Array(authBits))
+  };
+}
+
+/**
+ * Cifra un texto plano en el navegador usando AES-GCM
+ */
+async function encryptLocal(plainText, aesKey) {
+  const iv = crypto.getRandomValues(new Uint8Array(12)); // Vector de inicialización único
+  const encryptedBuffer = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: iv },
+    aesKey,
+    encoder.encode(plainText)
+  );
+
+  return {
+    ciphertextHex: bytesToHex(new Uint8Array(encryptedBuffer)),
+    ivHex: bytesToHex(iv)
+  };
+}
+
+/**
+ * Descifra un texto cifrado en el navegador usando AES-GCM
+ */
+async function decryptLocal(ciphertextHex, ivHex, aesKey) {
+  const ciphertext = hexToBytes(ciphertextHex);
+  const iv = hexToBytes(ivHex);
+
+  const decryptedBuffer = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: iv },
+    aesKey,
+    ciphertext
+  );
+
+  return decoder.decode(decryptedBuffer);
+}
+
+// Clave AES en memoria volátil de la sesión
+let currentAesKey = null;
+
 document.addEventListener("DOMContentLoaded", async () => {
   // Elementos de la interfaz
   const viewLogin = document.getElementById("view-login");
@@ -140,7 +243,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (!data.currentUser) return showStatus("Por favor inicia sesión", "error");
 
       showStatus("Consultando y descifrando...", "info");
-      resultsContainer.innerHTML = "";
+      resultsContainer.textContent = "";
 
       try {
         const payload = {
@@ -333,7 +436,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     viewMain.classList.add("hidden");
     btnLogout.classList.add("hidden");
     document.getElementById("login-password").value = "";
-    resultsContainer.innerHTML = "";
+    resultsContainer.textContent = "";
   }
 
   function showStatus(msg, type) {
@@ -355,9 +458,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   function renderResults(lista) {
-    resultsContainer.innerHTML = "";
+    resultsContainer.textContent = "";
     if (lista.length === 0) {
-      resultsContainer.innerHTML = `<div style="padding: 12px; text-align: center; color: #a0aec0; font-size: 13px;">No se encontraron credenciales.</div>`;
+      const emptyDiv = document.createElement("div");
+      emptyDiv.style.cssText = "padding: 12px; text-align: center; color: #a0aec0; font-size: 13px;";
+      emptyDiv.textContent = "No se encontraron credenciales.";
+      resultsContainer.appendChild(emptyDiv);
       return;
     }
 
@@ -368,38 +474,97 @@ document.addEventListener("DOMContentLoaded", async () => {
         border: 1px solid rgba(255, 255, 255, 0.1);
         border-radius: 8px; padding: 12px; margin-top: 10px;
       `;
-      card.innerHTML = `
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-          <div style="font-weight: 700; color: #6366f1; font-size: 14px;">🌐 ${escapeHTML(c.sitio_web)}</div>
-          <div>
-            <button type="button" class="btn-edit-item" style="background:none; border:none; cursor:pointer; font-size:14px;" title="Editar">✏️</button>
-            <button type="button" class="btn-delete-item" style="background:none; border:none; cursor:pointer; font-size:14px; margin-left:6px;" title="Eliminar">🗑️</button>
-          </div>
-        </div>
-        <div style="font-size: 12px; color: #cbd5e1; margin-bottom: 4px;">👤 <b>Usuario:</b> ${escapeHTML(c.login_user)}</div>
-        <div style="font-size: 12px; color: #cbd5e1; display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-          <span>🔑 <b>Password:</b> <code style="background: #0f172a; padding: 2px 6px; border-radius: 4px; color: #38bdf8;">${escapeHTML(c.password)}</code></span>
-          <button type="button" class="btn-copy-item" style="background:none; border:none; cursor:pointer;" title="Copiar contraseña">📋</button>
-        </div>
-        <button type="button" class="btn-autofill" style="width: 100%; background: #4f46e5; color: #fff; border: none; border-radius: 6px; padding: 6px; font-size: 12px; font-weight: 600; cursor: pointer;">
-          ⚡ Auto-llenar en el sitio
-        </button>
-      `;
+
+      // 1. Fila de Encabezado (Sitio Web + Botones de Acción)
+      const headerRow = document.createElement("div");
+      headerRow.style.cssText = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;";
+
+      const siteTitle = document.createElement("div");
+      siteTitle.style.cssText = "font-weight: 700; color: #6366f1; font-size: 14px;";
+      siteTitle.textContent = `🌐 ${c.sitio_web || ""}`;
+
+      const actionButtons = document.createElement("div");
+
+      const btnEdit = document.createElement("button");
+      btnEdit.type = "button";
+      btnEdit.className = "btn-edit-item";
+      btnEdit.style.cssText = "background:none; border:none; cursor:pointer; font-size:14px;";
+      btnEdit.title = "Editar";
+      btnEdit.textContent = "✏️";
+
+      const btnDelete = document.createElement("button");
+      btnDelete.type = "button";
+      btnDelete.className = "btn-delete-item";
+      btnDelete.style.cssText = "background:none; border:none; cursor:pointer; font-size:14px; margin-left:6px;";
+      btnDelete.title = "Eliminar";
+      btnDelete.textContent = "🗑️";
+
+      actionButtons.appendChild(btnEdit);
+      actionButtons.appendChild(btnDelete);
+      headerRow.appendChild(siteTitle);
+      headerRow.appendChild(actionButtons);
+
+      // 2. Fila de Usuario
+      const userRow = document.createElement("div");
+      userRow.style.cssText = "font-size: 12px; color: #cbd5e1; margin-bottom: 4px;";
+      userRow.appendChild(document.createTextNode("👤 "));
+      const userLabel = document.createElement("b");
+      userLabel.textContent = "Usuario: ";
+      userRow.appendChild(userLabel);
+      userRow.appendChild(document.createTextNode(c.login_user || ""));
+
+      // 3. Fila de Contraseña con Botón Copiar
+      const passRow = document.createElement("div");
+      passRow.style.cssText = "font-size: 12px; color: #cbd5e1; display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;";
+
+      const passLabelSpan = document.createElement("span");
+      passLabelSpan.appendChild(document.createTextNode("🔑 "));
+      const passBold = document.createElement("b");
+      passBold.textContent = "Password: ";
+      passLabelSpan.appendChild(passBold);
+
+      const passCode = document.createElement("code");
+      passCode.style.cssText = "background: #0f172a; padding: 2px 6px; border-radius: 4px; color: #38bdf8;";
+      passCode.textContent = c.password || "";
+      passLabelSpan.appendChild(passCode);
+
+      const btnCopy = document.createElement("button");
+      btnCopy.type = "button";
+      btnCopy.className = "btn-copy-item";
+      btnCopy.style.cssText = "background:none; border:none; cursor:pointer;";
+      btnCopy.title = "Copiar contraseña";
+      btnCopy.textContent = "📋";
+
+      passRow.appendChild(passLabelSpan);
+      passRow.appendChild(btnCopy);
+
+      // 4. Botón de Auto-llenado
+      const btnAutofill = document.createElement("button");
+      btnAutofill.type = "button";
+      btnAutofill.className = "btn-autofill";
+      btnAutofill.style.cssText = "width: 100%; background: #4f46e5; color: #fff; border: none; border-radius: 6px; padding: 6px; font-size: 12px; font-weight: 600; cursor: pointer;";
+      btnAutofill.textContent = "⚡ Auto-llenar en el sitio";
+
+      // Ensamblar tarjeta
+      card.appendChild(headerRow);
+      card.appendChild(userRow);
+      card.appendChild(passRow);
+      card.appendChild(btnAutofill);
 
       // Evento: Copiar con autolimpieza efímera en 30 segundos
-      card.querySelector(".btn-copy-item").addEventListener("click", () => {
+      btnCopy.addEventListener("click", () => {
         copiarAlPortapapeles(c.password);
       });
 
       // Evento: Auto-llenar
-      card.querySelector(".btn-autofill").addEventListener("click", () => {
+      btnAutofill.addEventListener("click", () => {
         autofillCredentials(c.login_user, c.password);
         showStatus("¡Credenciales inyectadas!", "success");
         setTimeout(() => showStatus("", "hidden"), 2000);
       });
 
       // Evento: Eliminar
-      card.querySelector(".btn-delete-item").addEventListener("click", async () => {
+      btnDelete.addEventListener("click", async () => {
         chrome.storage.local.get(["currentUser", "masterPassword"], async (data) => {
           if (!data.currentUser || !data.masterPassword) return;
           if (!confirm(`¿Estás seguro de borrar las credenciales de '${c.sitio_web}'?`)) return;
@@ -429,7 +594,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       });
 
       // Evento: Editar
-      card.querySelector(".btn-edit-item").addEventListener("click", async () => {
+      btnEdit.addEventListener("click", async () => {
         const nuevoSitio = prompt("Editar sitio web:", c.sitio_web);
         if (nuevoSitio === null) return;
         const sitioNormalizado = normalizeDomain(nuevoSitio);
@@ -473,8 +638,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       resultsContainer.appendChild(card);
     });
   }
-
-  function escapeHTML(str) { return str.replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag)); }
 });
 
 // ==========================================
