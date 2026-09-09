@@ -390,7 +390,7 @@ if __name__ == "__main__":
     
     # 1. Definir datos de prueba del usuario
     TEST_USER = "usuario_demo"
-    TEST_MASTER_PASS = "MiPasswordMaestraSegura123!"
+    TEST_MASTER_PASS = "MiPasswordMaestraSegura123!"  # nosec B105
     
     with get_db_session() as session:
         # Limpieza previa para poder ejecutar el script múltiples veces sin errores de clave única
@@ -421,7 +421,7 @@ if __name__ == "__main__":
 
     # 3. Simular el login y verificar la contraseña maestra
     print("\n Simulando Login de Usuario...")
-    contrasena_ingresada = "MiPasswordMaestraSegura123!" # Cambiar para probar error
+    contrasena_ingresada = "MiPasswordMaestraSegura123!"  # nosec B105 # Cambiar para probar error
     
     with get_db_session() as session:
         usuario_db = session.query(Usuario).filter_by(username=TEST_USER).first()
@@ -445,7 +445,7 @@ if __name__ == "__main__":
         print("\n Cifrando y guardando credencial de prueba...")
         SITIO = "https://github.com"
         LOGIN = "desarrollador_senior"
-        PASS_PLANA = "MiTokenUltraSecretoGithub2026!"
+        PASS_PLANA = "MiTokenUltraSecretoGithub2026!"  # nosec B105
         
         pass_encriptada = cifrar_contrasena(PASS_PLANA, clave_cifrado)
         

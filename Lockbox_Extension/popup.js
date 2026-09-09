@@ -238,7 +238,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // 4. Buscar Credenciales usando el usuario activo
   btnSearch.addEventListener("click", async () => {
     const querySite = searchSiteInput.value.trim().toLowerCase();
-    
+
     chrome.storage.local.get(["currentUser", "masterPassword"], async (data) => {
       if (!data.currentUser) return showStatus("Por favor inicia sesión", "error");
 
@@ -286,7 +286,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // 5. Guardar nueva credencial
   viewAdd.addEventListener("submit", async (e) => {
     e.preventDefault();
-    
+
     chrome.storage.local.get(["currentUser", "masterPassword"], async (data) => {
       if (!data.currentUser || !data.masterPassword) {
         showStatus("Debes iniciar sesión primero.", "error");

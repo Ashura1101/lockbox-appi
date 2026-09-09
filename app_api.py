@@ -557,5 +557,6 @@ def ratelimit_handler(e):
 
 
 if __name__ == "__main__":
-    print("🚀 Servidor API iniciando en http://127.0.0.1:5000")
-    app.run(debug=True, port=5000)
+    DEBUG_MODE = os.getenv("FLASK_DEBUG", "False").lower() == "true"
+    print(f"🚀 Servidor API iniciando en http://127.0.0.1:5000 (Debug: {DEBUG_MODE})")
+    app.run(debug=DEBUG_MODE, port=5000)
