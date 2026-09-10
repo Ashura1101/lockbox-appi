@@ -52,11 +52,16 @@ app = Flask(__name__)
 # Sin esto, flask-limiter ve siempre la IP interna del proxy y el rate limit no funciona bien.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
-# Configuración estricta de CORS
-EXTENSION_ID = os.getenv("EXTENSION_ID", "akahlajpbbkppfnijfoelpgdelfaikkl")
-ALLOWED_ORIGIN = f"chrome-extension://{EXTENSION_ID}"
-
-CORS(app, resources={r"/api/*": {"origins": [ALLOWED_ORIGIN]}})
+# Configuración de CORS para desarrollo y producción.
+# Orígenes wildcard/localhost, con soporte de credenciales y cabeceras/métodos
+# explícitos para que las peticiones preflight respondan correctamente.
+CORS(
+    app,
+    resources={r"/api/*": {"origins": "*"}},
+    supports_credentials=True,
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app_api")
@@ -83,6 +88,22 @@ def apply_security_headers(response):
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['Content-Security-Policy'] = "default-src 'none'"
     return response
+
+
+# ==========================================
+# PREFLIGHT CORS — Respuesta OPTIONS global
+# ==========================================
+@app.route('/api/<path:path>', methods=['OPTIONS'])
+def cors_preflight(path):
+    """Responde las peticiones preflight con 200 y cabeceras Access-Control-Allow-*."""
+    response = jsonify({'message': 'CORS preflight OK'})
+    origin = request.headers.get('Origin')
+    response.headers['Access-Control-Allow-Origin'] = origin if origin else '*'
+    response.headers['Access-Control-Allow-Credentials'] = 'true'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    response.headers['Access-Control-Max-Age'] = '86400'
+    return response, 200
 
 
 # ==========================================
@@ -373,6 +394,7 @@ def add_credential():
     raw_sitio = data.get("sitio_web", "").strip()
     login_user = data.get("login_user", "").strip()
     password_guardar = data.get("password", "").strip()
+    categoria = data.get("categoria")
 
     sitio_web = normalize_domain(raw_sitio)
 
@@ -394,6 +416,17 @@ def add_credential():
             login_user=login_user,
             password_cifrada=pass_cifrada
         )
+
+        if categoria:
+            nombre_cat = categoria.strip()
+            if nombre_cat.lower() != 'sin categoría':
+                cat = session.query(Categoria).filter_by(nombre=nombre_cat).first()
+                if not cat:
+                    cat = Categoria(nombre=nombre_cat)
+                    session.add(cat)
+                    session.flush()
+                nueva_cred.categoria = cat
+
         session.add(nueva_cred)
 
         return jsonify({"message": f"Credencial para '{sitio_web}' guardada con éxito"}), 201
@@ -452,6 +485,7 @@ def update_credential():
         sitio_web = data.get('sitio_web')
         login_user = data.get('login_user')
         new_password = data.get('password')
+        categoria = data.get('categoria')
 
         if not cred_id or not username or not master_password:
             return jsonify({'error': 'Faltan parámetros requeridos'}), 400
@@ -479,6 +513,18 @@ def update_credential():
                 clave_cifrado = derivar_clave_fernet(master_password, usuario.salt_derivacion)
                 pass_cifrada = cifrar_contrasena(new_password, clave_cifrado)
                 credencial.password_cifrada = pass_cifrada
+
+            if categoria is not None:
+                nombre_cat = categoria.strip()
+                if nombre_cat and nombre_cat.lower() != 'sin categoría':
+                    cat = session.query(Categoria).filter_by(nombre=nombre_cat).first()
+                    if not cat:
+                        cat = Categoria(nombre=nombre_cat)
+                        session.add(cat)
+                        session.flush()
+                    credencial.categoria = cat
+                else:
+                    credencial.categoria = None
 
         return jsonify({'message': 'Credencial actualizada con éxito'}), 200
 
