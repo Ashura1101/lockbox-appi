@@ -52,12 +52,38 @@ app = Flask(__name__)
 # Sin esto, flask-limiter ve siempre la IP interna del proxy y el rate limit no funciona bien.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
-# Configuración de CORS para desarrollo y producción.
-# Orígenes wildcard/localhost, con soporte de credenciales y cabeceras/métodos
-# explícitos para que las peticiones preflight respondan correctamente.
+# ==========================================
+# LISTA BLANCA DE ORÍGENES PERMITIDOS (CORS)
+# ==========================================
+# Orígenes de desarrollo local basados en app_api.py (puerto 5000) y servidores dev (8000).
+# Para la extensión de Chrome o frontend en producción, configurar la variable de entorno ALLOWED_ORIGINS
+# (valores separados por coma, ej: "chrome-extension://<ID_REAL>,https://midominio.com").
+# NOTA: No se inventa un ID fijo para la extensión de Chrome porque Lockbox_Extension/manifest.json
+# no define una clave 'key' fija; su ID varía entre instalaciones sin empaquetar o al publicarse.
+DEFAULT_ALLOWED_ORIGINS = [
+    "http://127.0.0.1:5000",
+    "http://localhost:5000",
+    "http://127.0.0.1:8000",
+    "http://localhost:8000",
+]
+
+raw_allowed_origins = os.getenv("ALLOWED_ORIGINS")
+if raw_allowed_origins:
+    ALLOWED_ORIGINS = [o.strip() for o in raw_allowed_origins.split(",") if o.strip()]
+else:
+    ALLOWED_ORIGINS = list(DEFAULT_ALLOWED_ORIGINS)
+
+# Soporte opcional para EXTENSION_ID (siguiendo el patrón observado en api.py)
+extension_id = os.getenv("EXTENSION_ID")
+if extension_id:
+    chrome_ext_origin = f"chrome-extension://{extension_id.strip()}"
+    if chrome_ext_origin not in ALLOWED_ORIGINS:
+        ALLOWED_ORIGINS.append(chrome_ext_origin)
+
+# Configuración de CORS con lista blanca explícita
 CORS(
     app,
-    resources={r"/api/*": {"origins": "*"}},
+    resources={r"/api/*": {"origins": ALLOWED_ORIGINS}},
     supports_credentials=True,
     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
@@ -95,14 +121,15 @@ def apply_security_headers(response):
 # ==========================================
 @app.route('/api/<path:path>', methods=['OPTIONS'])
 def cors_preflight(path):
-    """Responde las peticiones preflight con 200 y cabeceras Access-Control-Allow-*."""
+    """Responde las peticiones preflight con 200 y cabeceras Access-Control-Allow-* solo si el origen está permitido."""
     response = jsonify({'message': 'CORS preflight OK'})
     origin = request.headers.get('Origin')
-    response.headers['Access-Control-Allow-Origin'] = origin if origin else '*'
-    response.headers['Access-Control-Allow-Credentials'] = 'true'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-    response.headers['Access-Control-Max-Age'] = '86400'
+    if origin and origin in ALLOWED_ORIGINS:
+        response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Access-Control-Allow-Credentials'] = 'true'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        response.headers['Access-Control-Max-Age'] = '86400'
     return response, 200
 
 
@@ -127,6 +154,34 @@ def token_requerido(f):
 
         request.user_id = payload["sub"]
         request.token_jti = payload["jti"]
+        return f(*args, **kwargs)
+    return decorator
+
+
+def token_opcional_log(f):
+    @wraps(f)
+    def decorator(*args, **kwargs):
+        auth_header = request.headers.get("Authorization")
+
+        if not auth_header or not auth_header.startswith("Bearer "):
+            logger.warning(f"[JWT_SOFT_LAUNCH] sin_token ruta={request.path} metodo={request.method}")
+            return f(*args, **kwargs)
+
+        token = auth_header.split(" ")[1]
+
+        try:
+            payload, error = verificar_token(token, expected_type="access")
+        except Exception:
+            logger.warning(f"[JWT_SOFT_LAUNCH] error_verificacion ruta={request.path}")
+            return f(*args, **kwargs)
+
+        if error:
+            logger.warning(f"[JWT_SOFT_LAUNCH] token_invalido ruta={request.path} metodo={request.method} motivo={error}")
+        elif es_jti_revocado(payload["jti"]):
+            logger.warning(f"[JWT_SOFT_LAUNCH] token_revocado ruta={request.path} sub={payload['sub']}")
+        else:
+            logger.info(f"[JWT_SOFT_LAUNCH] token_valido ruta={request.path} sub={payload['sub']}")
+
         return f(*args, **kwargs)
     return decorator
 
@@ -199,6 +254,9 @@ def register():
     if not username or not master_password:
         return jsonify({"error": "El nombre de usuario y la contraseña son requeridos"}), 400
 
+    if len(master_password) < 8:
+        return jsonify({"error": "La contraseña maestra debe tener al menos 8 caracteres"}), 400
+
     with get_db_session() as session:
         # Verificar si el usuario ya existe
         usuario_existente = session.query(Usuario).filter_by(username=username).first()
@@ -261,6 +319,7 @@ def login():
 
 @app.route("/api/credentials", methods=["POST"])
 @limiter.limit("30 per minute", per_method=True)
+@token_opcional_log
 def get_credentials():
     """
     Obtiene y descifra las contraseñas del usuario, opcionalmente filtradas por query.
@@ -313,21 +372,17 @@ def get_credentials():
         return jsonify({"credenciales": lista_credenciales}), 200
 
 
-@app.route("/api/credentials/search", methods=["GET", "POST"])
+@app.route("/api/credentials/search", methods=["POST"])
 @limiter.limit("30 per minute")
+@token_opcional_log
 def search_credentials():
     """
     Busca credenciales utilizando coincidencia inclusiva por FQDN y nombre base.
     """
-    if request.method == "POST":
-        data = request.get_json() or {}
-        query = data.get("query", "").strip().lower()
-        username = data.get("username", "").strip()
-        master_password = data.get("master_password", "").strip()
-    else:
-        query = request.args.get("query", "").strip().lower()
-        username = request.args.get("username", "").strip()
-        master_password = request.args.get("master_password", "").strip()
+    data = request.get_json() or {}
+    query = data.get("query", "").strip().lower()
+    username = data.get("username", "").strip()
+    master_password = data.get("master_password", "").strip()
 
     if not username or not master_password:
         return jsonify({"error": "Parámetros username y master_password son requeridos"}), 400
@@ -377,6 +432,7 @@ def search_credentials():
 
 @app.route("/api/credentials/add", methods=["POST"])
 @limiter.limit("10 per minute")  # Evita la inserción masiva automatizada de credenciales
+@token_opcional_log
 def add_credential():
     """
     Guarda una nueva contraseña encriptada en la base de datos.
@@ -436,6 +492,7 @@ def add_credential():
 # ==========================================
 @app.route('/api/credentials/delete', methods=['POST'])
 @limiter.limit("10 per minute")  # Previene eliminación masiva de credenciales
+@token_opcional_log
 def delete_credential():
     try:
         import uuid
@@ -475,6 +532,7 @@ def delete_credential():
 # ==========================================
 @app.route('/api/credentials/update', methods=['POST'])
 @limiter.limit("10 per minute")  # Previene modificaciones masivas automatizadas
+@token_opcional_log
 def update_credential():
     try:
         import uuid

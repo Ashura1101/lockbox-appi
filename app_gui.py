@@ -8,6 +8,9 @@ import requests
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("lockbox_theme.json")
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from seguridad import generar_contrasena_segura, normalize_domain
 
 # URL de la API desplegada en Render
@@ -61,6 +64,7 @@ class AgregarCredencialWindow(ctk.CTkToplevel):
     """
     def __init__(self, parent: ctk.CTkFrame, username: str, master_password: str, on_save_callback: Callable[[], None]):
         super().__init__(parent)
+        self.parent_window = parent.parent
         self.username = username
         self.master_password = master_password
         self.on_save_callback = on_save_callback
@@ -246,7 +250,7 @@ class AgregarCredencialWindow(ctk.CTkToplevel):
             return
 
         try:
-            response = requests.post(
+            response = self.parent_window.authenticated_post(
                 f"{API_BASE_URL}/credentials/add",
                 json={
                     "username": self.username,
@@ -406,6 +410,7 @@ class EditarCredencialWindow(ctk.CTkToplevel):
     ):
         super().__init__(parent)
         self.credencial_id = credencial_id
+        self.parent_window = parent.parent
         self.username = username
         self.master_password = master_password
         self.on_save_callback = on_save_callback
@@ -559,7 +564,7 @@ class EditarCredencialWindow(ctk.CTkToplevel):
             payload["password"] = nueva_pass
 
         try:
-            response = requests.post(
+            response = self.parent_window.authenticated_post(
                 f"{API_BASE_URL}/credentials/update",
                 json=payload,
                 timeout=10
@@ -744,7 +749,7 @@ class DashboardFrame(ctk.CTkFrame):
         categoria_seleccionada = self.categoria_var.get()
 
         try:
-            response = requests.post(
+            response = self.parent.authenticated_post(
                 f"{API_BASE_URL}/credentials",
                 json={
                     "username": self.username,
@@ -999,7 +1004,7 @@ class DashboardFrame(ctk.CTkFrame):
             return
 
         try:
-            response = requests.post(
+            response = self.parent.authenticated_post(
                 f"{API_BASE_URL}/credentials/delete",
                 json={
                     "id": credencial_id,
@@ -1059,6 +1064,8 @@ class App(ctk.CTk):
 
         self.username = None
         self.master_password = None
+        self.access_token = None
+        self.refresh_token = None
         self.dashboard_frame = None
         self._clipboard_timer = None
 
@@ -1281,6 +1288,8 @@ class App(ctk.CTk):
                 data = response.json()
                 self.username = data.get("username", username)
                 self.master_password = password
+                self.access_token = data.get("access_token")
+                self.refresh_token = data.get("refresh_token")
                 logger.info(f"Acceso concedido vía API a la bóveda para el usuario: {username}")
                 self.mostrar_dashboard()
             elif response.status_code == 429:
@@ -1346,6 +1355,37 @@ class App(ctk.CTk):
             logger.error(f"Error de conexión en registro: {err}")
             self.show_status("Error de conexión con el servidor API en Render.", is_error=True)
 
+    def authenticated_post(self, url, json=None, timeout=10):
+        headers = {"Authorization": f"Bearer {self.access_token}"}
+
+        response = requests.post(url, json=json, headers=headers, timeout=timeout)
+
+        if response.status_code != 401:
+            return response
+
+        if self.refresh_token is None:
+            return response
+
+        refresh_response = requests.post(
+            f"{API_BASE_URL}/auth/refresh",
+            json={"refresh_token": self.refresh_token},
+            timeout=timeout
+        )
+
+        if refresh_response.status_code == 200:
+            tokens = refresh_response.json()
+            self.access_token = tokens.get("access_token")
+            self.refresh_token = tokens.get("refresh_token")
+
+            headers = {"Authorization": f"Bearer {self.access_token}"}
+            return requests.post(url, json=json, headers=headers, timeout=timeout)
+
+        self.access_token = None
+        self.refresh_token = None
+        self.master_password = None
+        self.handle_logout()
+        return response
+
     def mostrar_dashboard(self):
         self.destroy_login_ui()
         self.geometry("950x650")
@@ -1364,6 +1404,8 @@ class App(ctk.CTk):
         self.limpiar_portapapeles()
         self.username = None
         self.master_password = None
+        self.access_token = None
+        self.refresh_token = None
 
         self.geometry("450x550")
         self.resizable(False, False)

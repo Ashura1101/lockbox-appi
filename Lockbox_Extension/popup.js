@@ -144,6 +144,51 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
+  // Helper de request autenticado con refresh automático
+  async function authFetch(url, options) {
+    options = options || {};
+
+    const sessionData = await chrome.storage.session.get("accessToken");
+    const accessToken = sessionData.accessToken;
+
+    const headers = new Headers(options.headers || {});
+    headers.set("Authorization", `Bearer ${accessToken}`);
+
+    let response = await fetch(url, { ...options, headers });
+
+    if (response.status !== 401) {
+      return response;
+    }
+
+    const refreshData = await chrome.storage.session.get("refreshToken");
+    const refreshToken = refreshData.refreshToken;
+
+    if (!refreshToken) {
+      return response;
+    }
+
+    const refreshResponse = await fetch(`${API_URL}/auth/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: refreshToken })
+    });
+
+    if (refreshResponse.status === 200) {
+      const tokens = await refreshResponse.json();
+      await chrome.storage.session.set({
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token
+      });
+
+      headers.set("Authorization", `Bearer ${tokens.access_token}`);
+      return fetch(url, { ...options, headers });
+    }
+
+    await chrome.storage.session.remove(["accessToken", "refreshToken", "currentUser", "masterPassword"]);
+    showLoginView();
+    return response;
+  }
+
   // AUTO-DETECCIÓN DE PESTAÑA ACTIVA
   if (typeof chrome !== "undefined" && chrome.tabs) {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
@@ -163,7 +208,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   // 1. Comprobar si ya hay una sesión activa guardada
-  chrome.storage.local.get(["currentUser", "masterPassword"], (data) => {
+  chrome.storage.session.get(["currentUser", "masterPassword"], (data) => {
     if (data.currentUser && data.masterPassword) {
       showMainView(data.currentUser);
     } else {
@@ -199,7 +244,7 @@ document.addEventListener("DOMContentLoaded", async () => {
             refreshToken: resData.refresh_token
           });
         }
-        chrome.storage.local.set({ currentUser: username, masterPassword: masterPassword }, () => {
+        chrome.storage.session.set({ currentUser: username, masterPassword: masterPassword }, () => {
           showMainView(username);
         });
       } else {
@@ -215,7 +260,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.session) {
       chrome.storage.session.remove(["accessToken", "refreshToken"]);
     }
-    chrome.storage.local.remove(["currentUser", "masterPassword"], () => {
+    chrome.storage.session.remove(["currentUser", "masterPassword"], () => {
       showLoginView();
     });
   });
@@ -239,7 +284,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   btnSearch.addEventListener("click", async () => {
     const querySite = searchSiteInput.value.trim().toLowerCase();
 
-    chrome.storage.local.get(["currentUser", "masterPassword"], async (data) => {
+    chrome.storage.session.get(["currentUser", "masterPassword"], async (data) => {
       if (!data.currentUser) return showStatus("Por favor inicia sesión", "error");
 
       showStatus("Consultando y descifrando...", "info");
@@ -252,7 +297,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         };
         if (querySite) payload.query = querySite;
 
-        const res = await fetch(`${API_URL}/credentials`, {
+        const res = await authFetch(`${API_URL}/credentials`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload)
@@ -287,7 +332,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   viewAdd.addEventListener("submit", async (e) => {
     e.preventDefault();
 
-    chrome.storage.local.get(["currentUser", "masterPassword"], async (data) => {
+    chrome.storage.session.get(["currentUser", "masterPassword"], async (data) => {
       if (!data.currentUser || !data.masterPassword) {
         showStatus("Debes iniciar sesión primero.", "error");
         return;
@@ -300,7 +345,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       showStatus("Cifrando y guardando...", "info");
 
       try {
-        const response = await fetch(`${API_URL}/credentials/add`, {
+        const response = await authFetch(`${API_URL}/credentials/add`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -565,12 +610,12 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       // Evento: Eliminar
       btnDelete.addEventListener("click", async () => {
-        chrome.storage.local.get(["currentUser", "masterPassword"], async (data) => {
+        chrome.storage.session.get(["currentUser", "masterPassword"], async (data) => {
           if (!data.currentUser || !data.masterPassword) return;
           if (!confirm(`¿Estás seguro de borrar las credenciales de '${c.sitio_web}'?`)) return;
 
           try {
-            const res = await fetch(`${API_URL}/credentials/delete`, {
+            const res = await authFetch(`${API_URL}/credentials/delete`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
@@ -605,11 +650,11 @@ document.addEventListener("DOMContentLoaded", async () => {
         const nuevaPassword = prompt("Editar contraseña (déjalo igual si no quieres cambiarla):", c.password);
         if (nuevaPassword === null) return;
 
-        chrome.storage.local.get(["currentUser", "masterPassword"], async (data) => {
+        chrome.storage.session.get(["currentUser", "masterPassword"], async (data) => {
           if (!data.currentUser || !data.masterPassword) return;
 
           try {
-            const res = await fetch(`${API_URL}/credentials/update`, {
+            const res = await authFetch(`${API_URL}/credentials/update`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
