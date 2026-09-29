@@ -127,6 +127,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const addSiteInput = document.getElementById("add-site");
   const addUserInput = document.getElementById("add-user");
   const addPassInput = document.getElementById("add-pass");
+  const btnSaveCredential = viewAdd.querySelector('button[type="submit"]');
 
   // Estado del Servidor (Nube o Local)
   const apiStatusBadge = document.getElementById("api-status");
@@ -329,12 +330,20 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   // 5. Guardar nueva credencial
+  let isSubmitting = false;
+
   viewAdd.addEventListener("submit", async (e) => {
     e.preventDefault();
+
+    if (isSubmitting) return;
+    isSubmitting = true;
+    if (btnSaveCredential) btnSaveCredential.disabled = true;
 
     chrome.storage.session.get(["currentUser", "masterPassword"], async (data) => {
       if (!data.currentUser || !data.masterPassword) {
         showStatus("Debes iniciar sesión primero.", "error");
+        isSubmitting = false;
+        if (btnSaveCredential) btnSaveCredential.disabled = false;
         return;
       }
 
@@ -362,11 +371,16 @@ document.addEventListener("DOMContentLoaded", async () => {
         if (response.ok) {
           showStatus(`¡'${sitioWeb}' cifrado y guardado con éxito!`, "success");
           viewAdd.reset();
+        } else if (response.status === 409) {
+          showStatus(resData.error || "Ya existe una credencial para este sitio y usuario", "error");
         } else {
           showStatus(resData.error || "Error al guardar", "error");
         }
       } catch (err) {
         showStatus("Error de conexión con el servidor.", "error");
+      } finally {
+        isSubmitting = false;
+        if (btnSaveCredential) btnSaveCredential.disabled = false;
       }
     });
   });

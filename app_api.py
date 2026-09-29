@@ -29,6 +29,7 @@ from seguridad import (
     generar_par_tokens,
     verificar_token
 )
+from sqlalchemy.exc import IntegrityError
 import os
 import sys
 from dotenv import load_dotenv
@@ -457,35 +458,51 @@ def add_credential():
     if not all([username, master_password, sitio_web, login_user, password_guardar]):
         return jsonify({"error": "Todos los campos son obligatorios"}), 400
 
-    with get_db_session() as session:
-        usuario = session.query(Usuario).filter_by(username=username).first()
-        if not usuario or not verificar_hash_maestro(master_password, usuario.master_hash):
-            return jsonify({"error": "Credenciales inválidas"}), 401
+    try:
+        with get_db_session() as session:
+            usuario = session.query(Usuario).filter_by(username=username).first()
+            if not usuario or not verificar_hash_maestro(master_password, usuario.master_hash):
+                return jsonify({"error": "Credenciales inválidas"}), 401
 
-        # Derivar clave Fernet y cifrar la nueva contraseña
-        clave_cifrado = derivar_clave_fernet(master_password, usuario.salt_derivacion)
-        pass_cifrada = cifrar_contrasena(password_guardar, clave_cifrado)
+            # Prevenir duplicados: ya existe una credencial con el mismo sitio normalizado y login_user
+            existente = session.query(Credencial).filter_by(
+                usuario_id=usuario.id,
+                sitio_web=sitio_web,
+                login_user=login_user
+            ).first()
+            if existente:
+                return jsonify({
+                    "error": "Ya existe una credencial para este sitio y usuario",
+                    "existing_id": str(existente.id)
+                }), 409
 
-        nueva_cred = Credencial(
-            usuario_id=usuario.id,
-            sitio_web=sitio_web,
-            login_user=login_user,
-            password_cifrada=pass_cifrada
-        )
+            # Derivar clave Fernet y cifrar la nueva contraseña
+            clave_cifrado = derivar_clave_fernet(master_password, usuario.salt_derivacion)
+            pass_cifrada = cifrar_contrasena(password_guardar, clave_cifrado)
 
-        if categoria:
-            nombre_cat = categoria.strip()
-            if nombre_cat.lower() != 'sin categoría':
-                cat = session.query(Categoria).filter_by(nombre=nombre_cat).first()
-                if not cat:
-                    cat = Categoria(nombre=nombre_cat)
-                    session.add(cat)
-                    session.flush()
-                nueva_cred.categoria = cat
+            nueva_cred = Credencial(
+                usuario_id=usuario.id,
+                sitio_web=sitio_web,
+                login_user=login_user,
+                password_cifrada=pass_cifrada
+            )
 
-        session.add(nueva_cred)
+            if categoria:
+                nombre_cat = categoria.strip()
+                if nombre_cat.lower() != 'sin categoría':
+                    cat = session.query(Categoria).filter_by(nombre=nombre_cat).first()
+                    if not cat:
+                        cat = Categoria(nombre=nombre_cat)
+                        session.add(cat)
+                        session.flush()
+                    nueva_cred.categoria = cat
+
+            session.add(nueva_cred)
 
         return jsonify({"message": f"Credencial para '{sitio_web}' guardada con éxito"}), 201
+
+    except IntegrityError:
+        return jsonify({"error": "Ya existe una credencial para este sitio y usuario"}), 409
 
 # ==========================================
 # ELIMINAR CREDENCIAL
@@ -562,10 +579,25 @@ def update_credential():
             if not credencial:
                 return jsonify({'error': 'Credencial no encontrada'}), 404
 
+            nuevo_sitio = normalize_domain(sitio_web) if sitio_web is not None else credencial.sitio_web
+            nuevo_login = login_user if login_user is not None else credencial.login_user
+
+            conflicto = session.query(Credencial).filter(
+                Credencial.usuario_id == usuario.id,
+                Credencial.sitio_web == nuevo_sitio,
+                Credencial.login_user == nuevo_login,
+                Credencial.id != cred_uuid
+            ).first()
+            if conflicto:
+                return jsonify({
+                    'error': 'Ya existe una credencial para este sitio y usuario',
+                    'existing_id': str(conflicto.id)
+                }), 409
+
             if sitio_web is not None:
-                credencial.sitio_web = normalize_domain(sitio_web)
+                credencial.sitio_web = nuevo_sitio
             if login_user is not None:
-                credencial.login_user = login_user
+                credencial.login_user = nuevo_login
 
             if new_password:
                 clave_cifrado = derivar_clave_fernet(master_password, usuario.salt_derivacion)
@@ -585,6 +617,9 @@ def update_credential():
                     credencial.categoria = None
 
         return jsonify({'message': 'Credencial actualizada con éxito'}), 200
+
+    except IntegrityError:
+        return jsonify({'error': 'Ya existe una credencial para este sitio y usuario'}), 409
 
     except Exception as e:
         logger.error(f"Error al actualizar: {str(e)}")
