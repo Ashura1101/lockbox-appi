@@ -8,10 +8,18 @@ import jwt
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logger = logging.getLogger("seguridad")
 
-JWT_SECRET = os.getenv("JWT_SECRET_KEY", "CLAVE_ULTRA_SECRETA_CAMBIAR_EN_PROD")
+JWT_SECRET = os.getenv("JWT_SECRET_KEY")
+if not JWT_SECRET:
+    raise RuntimeError(
+        "La variable de entorno 'JWT_SECRET_KEY' no está definida. "
+        "Configúrala antes de ejecutar la aplicación."
+    )
 ALGORITHM = "HS256"
 
 
