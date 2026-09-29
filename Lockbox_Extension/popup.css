@@ -160,6 +160,13 @@ input[type="password"]:focus,
   transform: scale(0.98);
 }
 
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+  transform: none;
+}
+
 .icon-search {
   width: 16px;
   height: 16px;
