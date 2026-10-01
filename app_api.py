@@ -1,13 +1,26 @@
+# Importamos el módulo logging para registrar mensajes de depuracion errores
 import logging
+# Importamos Flask, request y jsonify del paquete flask para crear y manejar la aplicacion
 from flask import Flask, request, jsonify
+#Importamos CORS para permitir solicitudes de diferentes origenes
 from flask_cors import CORS
+#Importamos limiter para añadir límites de tasa a las rutas de la aplicación
 # Rate limiting para proteger rutas críticas contra fuerza bruta
 from flask_limiter import Limiter
+#Importamos get_remote_address para obtener la direccion ip del solicitante
 from flask_limiter.util import get_remote_address
 # Middleware para leer la IP real del usuario detrás de un proxy (Render, Nginx, etc.)
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+# Importamos la función 'wraps' del módulo 'functools'
+# 'wraps' es un decorador que se utiliza para preservar la información de la función original
+# cuando se aplica un decorador a ella
 from functools import wraps
+
+# Importamos varias clases y funciones desde el módulo 'app_db'
+# El contenido entre paréntesis es una lista de todas las clases y funciones que se están importando
+# Estas incluyen clases como 'Usuario', 'Credencial', 'Categoria'
+# y funciones como 'get_db_session', 'init_db', 'revocar_jti', 'es_jti_revocado'
 from app_db import (
     get_db_session,
     Usuario,
@@ -17,6 +30,10 @@ from app_db import (
     revocar_jti,
     es_jti_revocado
 )
+
+# Importamos una colección de funciones del módulo 'seguridad'
+# Estas funciones están relacionadas con operaciones de seguridad y criptografía
+# como verificar hashes, derivar claves, cifrar, descifrar, etc.
 from seguridad import (
     verificar_hash_maestro,
     derivar_clave_fernet,
@@ -29,22 +46,35 @@ from seguridad import (
     generar_par_tokens,
     verificar_token
 )
+
+# Importamos la excepción IntegrityError del módulo sqlalchemy.exc
+# IntegrityError se utiliza para manejar errores relacionados con la integridad de los datos en una base de datos SQL
 from sqlalchemy.exc import IntegrityError
+
+# Importamos el módulo os, que proporciona funciones para interactuar con el sistema operativo
 import os
+
+# Importamos el módulo sys, que proporciona acceso a algunas variables y funciones utilizadas o mantenidas por el intérprete Python y a funciones que interactúan fuertemente con el intérprete
 import sys
+
+# Importamos la función load_dotenv del módulo dotenv
+# load_dotenv se utiliza para cargar variables de entorno desde un archivo .env en el directorio de trabajo actual
 from dotenv import load_dotenv
 
-# Cargar variables de entorno desde .env
+# Cargamos las variables de entorno desde el archivo .env
 load_dotenv()
 
-# Lista de variables obligatorias
+# Definimos una lista con las variables de entorno obligatorias
 REQUIRED_ENV_VARS = ["DATABASE_URL", "JWT_SECRET_KEY"]
 
-# Verificación Fail-Fast
+# Iteramos sobre las variables de entorno requeridas
 for var in REQUIRED_ENV_VARS:
-    if not os.getenv(var):
-        print(f"[ERROR CRÍTICO] La variable de entorno '{var}' no está definida. Deteniendo el servidor.")
+    # Verificamos si la variable de entorno está definida
+    if var not in os.environ:
+        # Si la variable de entorno no está definida, imprimimos un mensaje de error y salimos del programa
+        print(f"La variable de entorno '{var}' es requerida pero no está definida.")
         sys.exit(1)
+
 
 # Inicialización de la aplicación Flask
 app = Flask(__name__)
@@ -68,20 +98,34 @@ DEFAULT_ALLOWED_ORIGINS = [
     "http://localhost:8000",
 ]
 
+# Obtenemos el valor de la variable de entorno "ALLOWED_ORIGINS" y lo asignamos a la variable raw_allowed_origins
 raw_allowed_origins = os.getenv("ALLOWED_ORIGINS")
+
+# Verificamos si raw_allowed_origins no es None ni una cadena vacía
 if raw_allowed_origins:
+    # Si raw_allowed_origins no es None ni una cadena vacía, lo dividimos por comas para obtener una lista de orígenes permitidos
+    # Luego, eliminamos cualquier espacio en blanco al principio o al final de cada origen y filtramos los orígenes vacíos
     ALLOWED_ORIGINS = [o.strip() for o in raw_allowed_origins.split(",") if o.strip()]
 else:
+    # Si raw_allowed_origins es None o una cadena vacía, asignamos la lista de orígenes permitidos por defecto
     ALLOWED_ORIGINS = list(DEFAULT_ALLOWED_ORIGINS)
 
 # Soporte opcional para EXTENSION_ID (siguiendo el patrón observado en api.py)
 extension_id = os.getenv("EXTENSION_ID")
+# Verificamos si extension_id no es None ni una cadena vacía
 if extension_id:
+    # Si extension_id no es None ni una cadena vacía, creamos la URL del origen de la extensión de Chrome
     chrome_ext_origin = f"chrome-extension://{extension_id.strip()}"
+    # Verificamos si chrome_ext_origin no está en la lista de orígenes permitidos
     if chrome_ext_origin not in ALLOWED_ORIGINS:
+        # Si chrome_ext_origin no está en la lista, lo agregamos a la lista de orígenes permitidos
         ALLOWED_ORIGINS.append(chrome_ext_origin)
 
 # Configuración de CORS con lista blanca explícita
+# Se configura CORS para la aplicación Flask, permitiendo solo los orígenes en la lista ALLOWED_ORIGINS
+# Se habilita el soporte para credenciales (cookies, etc.)
+# Se especifican los métodos HTTP permitidos
+# Se especifican los encabezados permitidos
 CORS(
     app,
     resources={r"/api/*": {"origins": ALLOWED_ORIGINS}},
@@ -90,7 +134,12 @@ CORS(
     allow_headers=["Content-Type", "Authorization"],
 )
 
+# Configura la configuración básica del módulo logging
+# Establece el nivel de loggin en INFO, lo que significa que se registrara informacion, advertencias, errores y excepciones
 logging.basicConfig(level=logging.INFO)
+
+#Crea un logger específico para el módulo "app_api"
+# Un logger es un objeto que registra mensajes de diferecntes niveles
 logger = logging.getLogger("app_api")
 
 # ==========================================
@@ -109,61 +158,90 @@ limiter = Limiter(
 # ==========================================
 # ENCABEZADOS DE SEGURIDAD HTTP
 # ==========================================
+# app.after_request es un decorador que se ejecuta después de cada petición
 @app.after_request
 def apply_security_headers(response):
+    # Añade cabeceras de seguridad a la respuesta para proteger la aplicación de vulnerabilidades
     response.headers['X-Content-Type-Options'] = 'nosniff'
+    # Establece el encabezado X-Frame-Options para evitar qu la página se cargue dentro de un iframe
     response.headers['X-Frame-Options'] = 'DENY'
+    # Establece el encabezado Content-Security-Policy para evitar ataques XSS
     response.headers['Content-Security-Policy'] = "default-src 'none'"
+    # Devuelve la respuesta con los encabezados de seguridad aplicados
     return response
 
 
 # ==========================================
 # PREFLIGHT CORS — Respuesta OPTIONS global
 # ==========================================
+# Define una ruta para manejar las solicitudes prefight de CORS
 @app.route('/api/<path:path>', methods=['OPTIONS'])
 def cors_preflight(path):
     """Responde las peticiones preflight con 200 y cabeceras Access-Control-Allow-* solo si el origen está permitido."""
+    # Crea una respuesta JSON con el mensaje 'CORS preflight OK'
     response = jsonify({'message': 'CORS preflight OK'})
+    # Obtiene el origen de la solicitud
     origin = request.headers.get('Origin')
+    # Comprueba si el origen está en la lista de orígenes permitidos
     if origin and origin in ALLOWED_ORIGINS:
+        # Establece las cabeceras de CORS en la respuesta
         response.headers['Access-Control-Allow-Origin'] = origin
         response.headers['Access-Control-Allow-Credentials'] = 'true'
         response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
         response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-        response.headers['Access-Control-Max-Age'] = '86400'
+        response.headers['Access-Control-Max-Age'] = '86400' # Tiempo de vida de la prefligh request en segundos (1 día)
+    # Devuelve la respuesta con el código de estado 200
     return response, 200
 
 
 # ==========================================
 # DECORADOR AUTENTICACIÓN JWT Y LISTA NEGRA
 # ==========================================
+# Definimos una función decorada que se encarga de verificar el token JWT en cada petición
+# Solo las rutas que requieren autenticación deben usar este decorador
 def token_requerido(f):
+    # @wraps(f) es un decorador que se encarga de copiar los metadatos de la función f a la función decorator
     @wraps(f)
+    # Definimos la función decorator que se encarga de verificar el token JWT en cada petición
     def decorator(*args, **kwargs):
+        # Obtenemos el token JWT de la cabecera Authorization
         auth_header = request.headers.get("Authorization")
+        # Verificamos si el token JWT es válido
         if not auth_header or not auth_header.startswith("Bearer "):
+            # Si el token JWT es inválido, devolvemos un error 401
             return jsonify({"error": "Token de acceso requerido"}), 401
 
+        # Obtenemos el token JWT de la cabecera Authorization
         token = auth_header.split(" ")[1]
+        # Verificamos si el token JWT es válido
         payload, error = verificar_token(token, expected_type="access")
 
         if error:
+            # Si el token JWT es inválido, devolvemos un error 401
             return jsonify({"error": error}), 401
 
         if es_jti_revocado(payload["jti"]):
+            # Si el token JWT es inválido, devolvemos un error 401
             return jsonify({"error": "El token ha sido revocado"}), 401
 
+        # Obtenemos el ID de usuario y el JTI del token
         request.user_id = payload["sub"]
         request.token_jti = payload["jti"]
+        # Devolvemos la función f con el token JWT válido
         return f(*args, **kwargs)
     return decorator
 
 
+# Definimos una función decorada que se encarga de verificar el token JWT en cada petición
+# Solo las rutas que requieren autenticación deben usar este decorador
 def token_opcional_log(f):
+    # @wraps(f) es un decorador que se encarga de copiar los metadatos de la función f a la función decorator
     @wraps(f)
+    # Definimos la función decorator que se encarga de verificar el token JWT en cada petición
     def decorator(*args, **kwargs):
+        # Obtenemos el token JWT de la cabecera Authorization
         auth_header = request.headers.get("Authorization")
-
+        # Verificamos si el token JWT es válido
         if not auth_header or not auth_header.startswith("Bearer "):
             logger.warning(f"[JWT_SOFT_LAUNCH] sin_token ruta={request.path} metodo={request.method}")
             return f(*args, **kwargs)
@@ -437,12 +515,12 @@ def search_credentials():
 def add_credential():
     """
     Guarda una nueva contraseña encriptada en la base de datos.
-    Recibe JSON: { 
-        "username": "...", 
-        "master_password": "...", 
-        "sitio_web": "...", 
-        "login_user": "...", 
-        "password": "..." 
+    Recibe JSON: {
+        "username": "...",
+        "master_password": "...",
+        "sitio_web": "...",
+        "login_user": "...",
+        "password": "..."
     }
     """
     data = request.get_json() or {}
@@ -498,8 +576,13 @@ def add_credential():
                     nueva_cred.categoria = cat
 
             session.add(nueva_cred)
+            session.flush()
+            cred_id = str(nueva_cred.id)
 
-        return jsonify({"message": f"Credencial para '{sitio_web}' guardada con éxito"}), 201
+        return jsonify({
+            "message": f"Credencial para '{sitio_web}' guardada con éxito",
+            "id": cred_id
+        }), 201
 
     except IntegrityError:
         return jsonify({"error": "Ya existe una credencial para este sitio y usuario"}), 409
