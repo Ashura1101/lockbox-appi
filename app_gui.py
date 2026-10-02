@@ -4,6 +4,7 @@ from tkinter import messagebox
 import customtkinter as ctk
 from typing import Callable
 import requests
+import threading
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("lockbox_theme.json")
@@ -22,6 +23,10 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s"
 )
 logger = logging.getLogger("app_gui")
+
+# Mensajes amigables para errores de conexión al actualizar la bóveda
+SIN_CONEXION_MSG = "Sin conexión a Internet. No se pudo actualizar la bóveda."
+ERROR_GENERICO_MSG = "Error al actualizar la bóveda. Inténtalo de nuevo."
 
 
 def copiar_contrasena_segura(root_window, texto_secreto):
@@ -62,7 +67,7 @@ class AgregarCredencialWindow(ctk.CTkToplevel):
     """
     Ventana emergente (modal) para agregar una nueva credencial vía la API.
     """
-    def __init__(self, parent: ctk.CTkFrame, username: str, master_password: str, on_save_callback: Callable[[], None]):
+    def __init__(self, parent: ctk.CTkFrame, username: str, master_password: str, on_save_callback: Callable):
         super().__init__(parent)
         self.parent_window = parent.parent
         self.username = username
@@ -167,25 +172,18 @@ class AgregarCredencialWindow(ctk.CTkToplevel):
         )
         self.check_show_pass.pack(pady=(10, 14))
 
-        # Recuperar categorías disponibles desde la API
+        # Selector de categoría: se muestra inmediato y se carga sin bloquear.
+        # Reutiliza las categorías ya disponibles en el Dashboard (caché local).
+        self._dashboard = parent
         self.categorias_map = {}
-        categorias_valores = ["Sin Categoría"]
-        try:
-            cats = obtener_categorias_api()
-            for c in cats:
-                self.categorias_map[c["nombre"]] = c["id"]
-                categorias_valores.append(c["nombre"])
-        except Exception as e:
-            logger.error(f"Error al cargar categorías en el formulario: {e}")
-
-        # Menú desplegable para seleccionar categoría
         self.option_categoria = ctk.CTkOptionMenu(
             self,
             width=360,
-            values=categorias_valores
+            values=["Sin Categoría"]
         )
         self.option_categoria.set("Sin Categoría")
         self.option_categoria.pack(pady=(0, 14))
+        self._cargar_categorias_async()
 
         # Mensaje de error interno
         self.label_error = ctk.CTkLabel(
@@ -208,6 +206,33 @@ class AgregarCredencialWindow(ctk.CTkToplevel):
             command=self.guardar_credencial
         )
         self.btn_guardar.pack(pady=(4, 20))
+
+    def _cargar_categorias_async(self):
+        """Carga categorías sin bloquear. Reutiliza la caché del Dashboard si ya está disponible."""
+        cached = list(getattr(self._dashboard, "_categorias_nombres", []) or [])
+        if cached:
+            self._aplicar_categorias(cached)
+            return
+
+        def _worker():
+            cats = obtener_categorias_api()
+            nombres = [c.get("nombre") for c in cats if c.get("nombre")]
+            try:
+                self.after(0, lambda: self._aplicar_categorias(nombres))
+            except Exception:
+                pass
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _aplicar_categorias(self, nombres):
+        if not self.winfo_exists():
+            return
+        valores = ["Sin Categoría"] + [n for n in nombres if n and n != "Sin Categoría"]
+        actual = self.option_categoria.get()
+        self.option_categoria.configure(values=valores)
+        if actual in valores:
+            self.option_categoria.set(actual)
+        else:
+            self.option_categoria.set("Sin Categoría")
 
     def center_toplevel(self, parent):
         """Centra esta ventana sobre su ventana padre."""
@@ -249,32 +274,84 @@ class AgregarCredencialWindow(ctk.CTkToplevel):
             self.label_error.configure(text="Por favor, completa todos los campos.")
             return
 
-        try:
-            response = self.parent_window.authenticated_post(
-                f"{API_BASE_URL}/credentials/add",
-                json={
-                    "username": self.username,
-                    "master_password": self.master_password,
+        categoria_seleccionada = self.option_categoria.get().strip()
+        payload = {
+            "username": self.username,
+            "master_password": self.master_password,
+            "sitio_web": sitio,
+            "login_user": usuario,
+            "password": password,
+            "categoria": categoria_seleccionada
+        }
+
+        def _fetch():
+            try:
+                response = self.parent_window.authenticated_post(
+                    f"{API_BASE_URL}/credentials/add",
+                    json=payload,
+                    timeout=10
+                )
+                try:
+                    self.after(0, lambda: _on_result(response))
+                except Exception:
+                    pass  # Ventana cerrada antes de que el hilo terminara
+            except requests.exceptions.RequestException as e:
+                err = str(e)
+                try:
+                    self.after(0, lambda: _on_error(err))
+                except Exception:
+                    pass
+            except Exception as e:
+                err = str(e)
+                try:
+                    self.after(0, lambda: _on_error(err))
+                except Exception:
+                    pass
+
+        def _on_result(response):
+            if not self.winfo_exists():
+                return
+            if response.status_code == 201:
+                try:
+                    resp_data = response.json()
+                except Exception:
+                    resp_data = {}
+                new_cred = {
+                    "id": resp_data.get("id"),
                     "sitio_web": sitio,
                     "login_user": usuario,
-                    "password": password
-                },
-                timeout=10
-            )
-
-            if response.status_code == 201:
+                    "password": password,
+                    "categoria": categoria_seleccionada,
+                    "created_at": resp_data.get("created_at"),
+                    "updated_at": resp_data.get("updated_at")
+                }
                 logger.info(f"Credencial para '{sitio}' guardada con éxito vía API.")
-                self.on_save_callback()
+                self.on_save_callback(new_cred)
                 self.destroy()
             elif response.status_code == 429:
                 self.label_error.configure(text="Has superado el límite de peticiones. Espera un momento.")
+                _restore_button()
             else:
-                data = response.json() if response.headers.get("content-type") == "application/json" else {}
+                try:
+                    data = response.json()
+                except Exception:
+                    data = {}
                 self.label_error.configure(text=data.get("error", "Error al guardar la credencial."))
+                _restore_button()
 
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error al conectar con la API al guardar credencial: {e}")
+        def _on_error(err: str):
+            if not self.winfo_exists():
+                return
+            logger.error(f"Error al conectar con la API al guardar credencial: {err}")
             self.label_error.configure(text="Error de conexión con el servidor.")
+            _restore_button()
+
+        def _restore_button():
+            if self.winfo_exists():
+                self.btn_guardar.configure(state="normal", text="Guardar Credencial")
+
+        self.btn_guardar.configure(state="disabled", text="Guardando...")
+        threading.Thread(target=_fetch, daemon=True).start()
 
 
 class GenerarContrasenaWindow(ctk.CTkToplevel):
@@ -406,7 +483,7 @@ class EditarCredencialWindow(ctk.CTkToplevel):
         categoria_nombre_actual: str,
         username: str,
         master_password: str,
-        on_save_callback: Callable[[], None]
+        on_save_callback: Callable
     ):
         super().__init__(parent)
         self.credencial_id = credencial_id
@@ -495,33 +572,54 @@ class EditarCredencialWindow(ctk.CTkToplevel):
         )
         self.check_show_pass.pack(pady=(5, 10))
 
-        # Selector de categoría desde la API
+        # Selector de categoría: se muestra inmediato y se carga sin bloquear.
+        # Reutiliza las categorías ya disponibles en el Dashboard (caché local).
+        self._dashboard = parent
         self.categorias_map = {}
-        categorias_valores = ["Sin Categoría"]
         nombre_cat_actual = categoria_nombre_actual or "Sin Categoría"
-        try:
-            cats = obtener_categorias_api()
-            for c in cats:
-                self.categorias_map[c["nombre"]] = c["id"]
-                categorias_valores.append(c["nombre"])
-        except Exception as e:
-            logger.error(f"Error al cargar categorías en ventana de edición: {e}")
-
-        self.option_categoria = ctk.CTkOptionMenu(self, width=300, values=categorias_valores)
+        self.option_categoria = ctk.CTkOptionMenu(self, width=300, values=["Sin Categoría"])
         self.option_categoria.set(nombre_cat_actual)
         self.option_categoria.pack(pady=8)
+        self._cargar_categorias_async(nombre_cat_actual)
 
         self.label_error = ctk.CTkLabel(self, text="", text_color="#FF3333", font=ctk.CTkFont(size=12))
         self.label_error.pack(pady=4)
 
-        ctk.CTkButton(
+        self.btn_guardar_cambios = ctk.CTkButton(
             self,
             text="Guardar Cambios",
             width=200,
             fg_color="#1F6AA5",
             hover_color="#144870",
             command=self.guardar_cambios
-        ).pack(pady=(5, 15))
+        )
+        self.btn_guardar_cambios.pack(pady=(5, 15))
+
+    def _cargar_categorias_async(self, valor_actual):
+        """Carga categorías sin bloquear. Reutiliza la caché del Dashboard si ya está disponible."""
+        cached = list(getattr(self._dashboard, "_categorias_nombres", []) or [])
+        if cached:
+            self._aplicar_categorias(cached, valor_actual)
+            return
+
+        def _worker():
+            cats = obtener_categorias_api()
+            nombres = [c.get("nombre") for c in cats if c.get("nombre")]
+            try:
+                self.after(0, lambda: self._aplicar_categorias(nombres, valor_actual))
+            except Exception:
+                pass
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _aplicar_categorias(self, nombres, valor_actual):
+        if not self.winfo_exists():
+            return
+        valores = ["Sin Categoría"] + [n for n in nombres if n and n != "Sin Categoría"]
+        self.option_categoria.configure(values=valores)
+        if valor_actual in valores:
+            self.option_categoria.set(valor_actual)
+        else:
+            self.option_categoria.set("Sin Categoría")
 
     def center_toplevel(self, parent):
         self.update_idletasks()
@@ -553,36 +651,85 @@ class EditarCredencialWindow(ctk.CTkToplevel):
             self.label_error.configure(text="Sitio web y usuario no pueden estar vacíos.")
             return
 
+        categoria_seleccionada = self.option_categoria.get().strip()
         payload = {
             "id": self.credencial_id,
             "username": self.username,
             "master_password": self.master_password,
             "sitio_web": sitio,
-            "login_user": usuario
+            "login_user": usuario,
+            "categoria": categoria_seleccionada
         }
         if nueva_pass:
             payload["password"] = nueva_pass
 
-        try:
-            response = self.parent_window.authenticated_post(
-                f"{API_BASE_URL}/credentials/update",
-                json=payload,
-                timeout=10
-            )
+        def _fetch():
+            try:
+                response = self.parent_window.authenticated_post(
+                    f"{API_BASE_URL}/credentials/update",
+                    json=payload,
+                    timeout=10
+                )
+                try:
+                    self.after(0, lambda: _on_result(response))
+                except Exception:
+                    pass  # Ventana cerrada antes de que el hilo terminara
+            except requests.exceptions.RequestException as e:
+                err = str(e)
+                try:
+                    self.after(0, lambda: _on_error(err))
+                except Exception:
+                    pass
+            except Exception as e:
+                err = str(e)
+                try:
+                    self.after(0, lambda: _on_error(err))
+                except Exception:
+                    pass
 
+        def _on_result(response):
+            if not self.winfo_exists():
+                return
             if response.status_code == 200:
+                try:
+                    resp_data = response.json()
+                except Exception:
+                    resp_data = {}
+                updated_fields = {
+                    "id": self.credencial_id,
+                    "sitio_web": sitio,
+                    "login_user": usuario,
+                    "password": nueva_pass,  # cadena vacía si el usuario no cambió la contraseña
+                    "categoria": categoria_seleccionada,
+                    "updated_at": resp_data.get("updated_at")
+                }
                 logger.info(f"Credencial '{sitio}' (ID: {self.credencial_id}) actualizada vía API.")
-                self.on_save_callback()
+                self.on_save_callback(updated_fields)
                 self.destroy()
             elif response.status_code == 429:
                 self.label_error.configure(text="Has superado el límite de peticiones. Espera un momento.")
+                _restore_button()
             else:
-                data = response.json() if response.headers.get("content-type") == "application/json" else {}
+                try:
+                    data = response.json()
+                except Exception:
+                    data = {}
                 self.label_error.configure(text=data.get("error", "Error al actualizar la credencial."))
+                _restore_button()
 
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error de conexión al actualizar credencial: {e}")
+        def _on_error(err: str):
+            if not self.winfo_exists():
+                return
+            logger.error(f"Error de conexión al actualizar credencial: {err}")
             self.label_error.configure(text="Error de conexión con el servidor.")
+            _restore_button()
+
+        def _restore_button():
+            if self.winfo_exists():
+                self.btn_guardar_cambios.configure(state="normal", text="Guardar Cambios")
+
+        self.btn_guardar_cambios.configure(state="disabled", text="Guardando...")
+        threading.Thread(target=_fetch, daemon=True).start()
 
 
 class DashboardFrame(ctk.CTkFrame):
@@ -598,6 +745,10 @@ class DashboardFrame(ctk.CTkFrame):
         self.on_logout = on_logout
         self._notif_timer = None
         self._mostrar_timers = {}
+        self._credenciales_cache: list = []   # Caché local de credenciales descifradas
+        self._load_generation: int = 0        # Contador de generación para descartar respuestas obsoletas
+        self._categorias_nombres: list = []   # Nombres de categorías disponibles (caché local)
+        self._ultima_firma_render = None      # Firma del último resultado renderizado
 
         self.grid_columnconfigure(0, weight=0, minsize=200)
         self.grid_columnconfigure(1, weight=1)
@@ -677,39 +828,45 @@ class DashboardFrame(ctk.CTkFrame):
             font=ctk.CTkFont(family="Helvetica", size=14)
         )
         self.search_entry.grid(row=0, column=0, sticky="ew", pady=(0, 15))
-        self.search_entry.bind("<KeyRelease>", lambda e: self.cargar_credenciales())
+        self.search_entry.bind("<KeyRelease>", lambda e: self._buscar_local())
 
         # Contenedor de Controles
         self.controls_frame = ctk.CTkFrame(self.content_panel, fg_color="transparent", border_width=0)
         self.controls_frame.grid(row=1, column=0, sticky="ew", pady=(0, 15))
         self.controls_frame.grid_columnconfigure(0, weight=0)
-        self.controls_frame.grid_columnconfigure(1, weight=1)
-        self.controls_frame.grid_columnconfigure(2, weight=0)
+        self.controls_frame.grid_columnconfigure(1, weight=0)
+        self.controls_frame.grid_columnconfigure(2, weight=1)
+        self.controls_frame.grid_columnconfigure(3, weight=0)
 
         self.categoria_var = tk.StringVar(value="Todas")
-        category_values = ["Todas"]
-        try:
-            cats = obtener_categorias_api()
-            for c in cats:
-                category_values.append(c["nombre"])
-        except Exception as e:
-            logger.error(f"Error al cargar categorías para filtro: {e}")
-
         self.categoria_menu = ctk.CTkOptionMenu(
             self.controls_frame,
             variable=self.categoria_var,
-            values=category_values,
+            values=["Todas"],
             width=150,
-            command=lambda _: self.cargar_credenciales()
+            command=lambda _: self._buscar_local()
         )
         self.categoria_menu.grid(row=0, column=0, sticky="w")
+        # Cargar categorías sin bloquear el hilo principal
+        self._cargar_categorias_async()
+
+        self.btn_actualizar = ctk.CTkButton(
+            self.controls_frame,
+            text="🔄 Actualizar",
+            font=ctk.CTkFont(family="Helvetica", size=13),
+            fg_color="#334155",
+            hover_color="#475569",
+            width=120,
+            command=self.on_actualizar_click
+        )
+        self.btn_actualizar.grid(row=0, column=1, sticky="w", padx=(10, 0))
 
         self.label_notificacion = ctk.CTkLabel(
             self.controls_frame,
             text="",
             font=ctk.CTkFont(family="Helvetica", size=13, weight="bold")
         )
-        self.label_notificacion.grid(row=0, column=1, padx=10)
+        self.label_notificacion.grid(row=0, column=2, padx=10)
 
         self.btn_agregar = ctk.CTkButton(
             self.controls_frame,
@@ -718,12 +875,50 @@ class DashboardFrame(ctk.CTkFrame):
             command=self.abrir_ventana_agregar,
             width=160
         )
-        self.btn_agregar.grid(row=0, column=2, sticky="e")
+        self.btn_agregar.grid(row=0, column=3, sticky="e")
 
         self.scroll_frame = ctk.CTkScrollableFrame(self.content_panel, fg_color="transparent")
         self.scroll_frame.grid(row=2, column=0, sticky="nsew")
 
         self.cargar_credenciales()
+
+    def _cargar_categorias_async(self):
+        """Carga los nombres de categoría en segundo plano (sin bloquear la UI)
+        y actualiza el selector y la caché local cuando terminan."""
+        def _worker():
+            cats = obtener_categorias_api()
+            nombres = [c.get("nombre") for c in cats if c.get("nombre")]
+            try:
+                self.after(0, lambda: self._on_categorias_cargadas(nombres))
+            except Exception:
+                pass
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_categorias_cargadas(self, nombres):
+        if not self.winfo_exists():
+            return
+        self._categorias_nombres = list(nombres)
+        valores = ["Todas"] + [n for n in self._categorias_nombres if n != "Todas"]
+        self.categoria_menu.configure(values=valores)
+        actual = self.categoria_var.get()
+        if actual not in valores:
+            self.categoria_var.set("Todas")
+            self._buscar_local()
+
+    def on_actualizar_click(self):
+        self.btn_actualizar.configure(state="disabled", text="🔄 Actualizando...")
+        self.update_idletasks()
+
+        def _on_done(exito: bool, error_msg: str = ""):
+            if exito:
+                self.mostrar_notificacion_temporal("✓ Bóveda actualizada", es_error=False)
+            else:
+                self.mostrar_notificacion_temporal(
+                    error_msg or "Error al actualizar la bóveda.", es_error=True
+                )
+            self.btn_actualizar.configure(state="normal", text="🔄 Actualizar")
+
+        self.cargar_credenciales(on_done=_on_done)
 
     def mostrar_notificacion_temporal(self, mensaje: str, es_error: bool = False):
         color = "#FF3333" if es_error else "#2ECC71"
@@ -734,7 +929,11 @@ class DashboardFrame(ctk.CTkFrame):
 
         self._notif_timer = self.after(4000, lambda: self.label_notificacion.configure(text=""))
 
-    def cargar_credenciales(self):
+    def cargar_credenciales(self, on_done=None):
+        """Descarga la bóveda completa en un hilo secundario y actualiza la caché local.
+        on_done: callable opcional con firma (exito: bool, error_msg: str = '') que se invoca
+        en el hilo principal cuando la operación termina."""
+        # Cancelar timers de contraseñas visibles
         for timer_id in list(self._mostrar_timers.values()):
             try:
                 self.after_cancel(timer_id)
@@ -742,65 +941,173 @@ class DashboardFrame(ctk.CTkFrame):
                 pass
         self._mostrar_timers.clear()
 
-        for widget in self.scroll_frame.winfo_children():
-            widget.destroy()
+        # Incrementar la generación para invalidar cualquier respuesta en vuelo
+        self._load_generation += 1
+        gen = self._load_generation
 
+        def _fetch():
+            try:
+                response = self.parent.authenticated_post(
+                    f"{API_BASE_URL}/credentials",
+                    json={
+                        "username": self.username,
+                        "master_password": self.master_password
+                    },
+                    timeout=10
+                )
+                if gen != self._load_generation:
+                    return  # Respuesta obsoleta: se inició una carga más reciente
+                try:
+                    self.after(0, lambda: _apply(response))
+                except Exception:
+                    pass  # DashboardFrame destruido durante logout
+            except requests.exceptions.RequestException as e:
+                if gen != self._load_generation:
+                    return
+                logger.error(f"Error de conexión al cargar credenciales: {e}")
+                try:
+                    self.after(0, lambda: _apply_error(SIN_CONEXION_MSG))
+                except Exception:
+                    pass
+            except Exception as e:
+                if gen != self._load_generation:
+                    return
+                logger.error(f"Error inesperado al cargar credenciales: {e}")
+                try:
+                    self.after(0, lambda: _apply_error(ERROR_GENERICO_MSG))
+                except Exception:
+                    pass
+
+        def _apply(response):
+            # Segunda comprobación de generación (puede haber pasado tiempo desde after())
+            if gen != self._load_generation:
+                return
+            if response.status_code == 200:
+                self._credenciales_cache = response.json().get("credenciales", [])
+                self._filtrar_y_renderizar()
+                if on_done:
+                    on_done(True)
+            elif response.status_code == 429:
+                msg = "Límite de peticiones alcanzado (Rate Limit). Espera un momento."
+                self.mostrar_notificacion_temporal(msg, es_error=True)
+                if on_done:
+                    on_done(False, msg)
+            else:
+                try:
+                    data = response.json()
+                except Exception:
+                    data = {}
+                err_msg = data.get("error", "Error al cargar credenciales.")
+                self.mostrar_notificacion_temporal(err_msg, es_error=True)
+                if on_done:
+                    on_done(False, err_msg)
+
+        def _apply_error(mensaje: str):
+            if gen != self._load_generation:
+                return
+            try:
+                if self.scroll_frame.winfo_exists():
+                    ctk.CTkLabel(
+                        self.scroll_frame,
+                        text=mensaje,
+                        text_color="#FF3333"
+                    ).pack(pady=20)
+            except Exception:
+                pass
+            if on_done:
+                on_done(False, mensaje)
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _filtrar_y_renderizar(self):
+        """Filtra la caché local según búsqueda activa y categoría y renderiza las tarjetas.
+        Debe ejecutarse siempre en el hilo principal de Tkinter."""
         texto_busqueda = self.search_entry.get().strip().lower()
         categoria_seleccionada = self.categoria_var.get()
 
-        try:
-            response = self.parent.authenticated_post(
-                f"{API_BASE_URL}/credentials",
-                json={
-                    "username": self.username,
-                    "master_password": self.master_password
-                },
-                timeout=10
+        credenciales = list(self._credenciales_cache)
+
+        if categoria_seleccionada != "Todas":
+            credenciales = [c for c in credenciales if c.get("categoria") == categoria_seleccionada]
+
+        if texto_busqueda:
+            credenciales = [
+                c for c in credenciales
+                if texto_busqueda in c.get("sitio_web", "").lower()
+                or texto_busqueda in c.get("login_user", "").lower()
+            ]
+
+        # Firma del resultado visible: si nada cambió respecto al último render,
+        # se evita destruir y reconstruir todos los widgets (escritura/categoría rápida).
+        firma = tuple(
+            (c.get("id"), c.get("sitio_web"), c.get("login_user"),
+             c.get("password"), c.get("categoria"))
+            for c in credenciales
+        )
+        if firma == self._ultima_firma_render:
+            return
+        self._ultima_firma_render = firma
+
+        for widget in self.scroll_frame.winfo_children():
+            widget.destroy()
+
+        if not credenciales:
+            self.mostrar_mensaje_vacio()
+            return
+
+        for i, cred in enumerate(credenciales):
+            self.crear_tarjeta_credencial(
+                credencial_id=cred.get("id"),
+                sitio_web=cred.get("sitio_web"),
+                login_user=cred.get("login_user"),
+                password=cred.get("password"),
+                categoria_nombre=cred.get("categoria"),
+                index=i
             )
 
-            if response.status_code == 200:
-                credenciales = response.json().get("credenciales", [])
+    def _buscar_local(self):
+        """Filtra y renderiza desde la caché local. Sin petición HTTP."""
+        self._filtrar_y_renderizar()
 
-                # Filtrar por categoría
-                if categoria_seleccionada != "Todas":
-                    credenciales = [c for c in credenciales if c.get("categoria") == categoria_seleccionada]
+    def _on_credencial_agregada(self, new_cred: dict):
+        """Inserta una credencial recién creada en la caché y re-renderiza. Sin petición HTTP."""
+        if new_cred:
+            # Invalidar respuestas en vuelo antes de modificar la caché
+            self._load_generation += 1
+            self._credenciales_cache.append(new_cred)
+        self._filtrar_y_renderizar()
 
-                # Filtrar por texto de búsqueda
-                if texto_busqueda:
-                    credenciales = [
-                        c for c in credenciales
-                        if texto_busqueda in c.get("sitio_web", "").lower()
-                        or texto_busqueda in c.get("login_user", "").lower()
-                    ]
+    def _on_credencial_editada(self, updated_fields: dict):
+        """Actualiza una credencial en la caché y re-renderiza. Sin petición HTTP.
+        Solo modifica los campos que el backend confirmó como actualizados."""
+        # Invalidar respuestas en vuelo antes de modificar la caché
+        self._load_generation += 1
+        cred_id = updated_fields.get("id")
+        for i, c in enumerate(self._credenciales_cache):
+            if c.get("id") == cred_id:
+                merged = dict(c)
+                merged["sitio_web"] = updated_fields.get("sitio_web", c.get("sitio_web"))
+                merged["login_user"] = updated_fields.get("login_user", c.get("login_user"))
+                # La contraseña solo se actualiza si el usuario proporcionó una nueva
+                nueva_pass = updated_fields.get("password", "")
+                if nueva_pass:
+                    merged["password"] = nueva_pass
+                # La categoría enviada en el payload de edición reemplaza a la original
+                if "categoria" in updated_fields:
+                    merged["categoria"] = updated_fields.get("categoria")
+                if updated_fields.get("updated_at"):
+                    merged["updated_at"] = updated_fields["updated_at"]
+                self._credenciales_cache[i] = merged
+                break
+        self._filtrar_y_renderizar()
 
-                if not credenciales:
-                    self.mostrar_mensaje_vacio()
-                    return
-
-                for i, cred in enumerate(credenciales):
-                    self.crear_tarjeta_credencial(
-                        credencial_id=cred.get("id"),
-                        sitio_web=cred.get("sitio_web"),
-                        login_user=cred.get("login_user"),
-                        password=cred.get("password"),
-                        categoria_nombre=cred.get("categoria"),
-                        index=i
-                    )
-            elif response.status_code == 429:
-                self.mostrar_notificacion_temporal("Límite de peticiones alcanzado (Rate Limit). Espera un momento.", es_error=True)
-            else:
-                data = response.json() if response.headers.get("content-type") == "application/json" else {}
-                err_msg = data.get("error", "Error al cargar credenciales.")
-                self.mostrar_notificacion_temporal(err_msg, es_error=True)
-
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error al cargar las credenciales vía API: {e}")
-            label_error = ctk.CTkLabel(
-                self.scroll_frame,
-                text="Error al conectar con la API en Render para cargar las credenciales.",
-                text_color="#FF3333"
-            )
-            label_error.pack(pady=20)
+    def _on_credencial_eliminada(self, cred_id: str, sitio_web: str):
+        """Elimina una credencial de la caché y re-renderiza. Sin petición HTTP."""
+        # Invalidar respuestas en vuelo antes de modificar la caché
+        self._load_generation += 1
+        self._credenciales_cache = [c for c in self._credenciales_cache if c.get("id") != cred_id]
+        self.mostrar_notificacion_temporal(f"Credencial '{sitio_web}' eliminada.")
+        self._filtrar_y_renderizar()
 
     def mostrar_mensaje_vacio(self):
         self.container_vacio = ctk.CTkFrame(self.scroll_frame, fg_color="transparent")
@@ -1003,31 +1310,53 @@ class DashboardFrame(ctk.CTkFrame):
         if not confirmar:
             return
 
-        try:
-            response = self.parent.authenticated_post(
-                f"{API_BASE_URL}/credentials/delete",
-                json={
-                    "id": credencial_id,
-                    "username": self.username,
-                    "master_password": self.master_password
-                },
-                timeout=10
-            )
+        def _fetch():
+            try:
+                response = self.parent.authenticated_post(
+                    f"{API_BASE_URL}/credentials/delete",
+                    json={
+                        "id": credencial_id,
+                        "username": self.username,
+                        "master_password": self.master_password
+                    },
+                    timeout=10
+                )
+                try:
+                    self.after(0, lambda: _on_result(response))
+                except Exception:
+                    pass
+            except requests.exceptions.RequestException as e:
+                err = str(e)
+                try:
+                    self.after(0, lambda: _on_error(err))
+                except Exception:
+                    pass
+            except Exception as e:
+                err = str(e)
+                try:
+                    self.after(0, lambda: _on_error(err))
+                except Exception:
+                    pass
 
+        def _on_result(response):
             if response.status_code == 200:
                 logger.info(f"Credencial '{sitio_web}' (ID: {credencial_id}) eliminada vía API.")
-                self.mostrar_notificacion_temporal(f"Credencial '{sitio_web}' eliminada.")
-                self.cargar_credenciales()
+                self._on_credencial_eliminada(credencial_id, sitio_web)
             elif response.status_code == 429:
                 messagebox.showerror("Límite superado", "Has alcanzado el límite de intentos. Por favor espera un momento.")
             else:
-                data = response.json() if response.headers.get("content-type") == "application/json" else {}
+                try:
+                    data = response.json()
+                except Exception:
+                    data = {}
                 err_msg = data.get("error", "No se pudo eliminar la credencial.")
                 messagebox.showerror("Error", err_msg)
 
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error al eliminar credencial vía API: {e}")
-            messagebox.showerror("Error de Conexión", f"No se pudo conectar con el servidor.\nDetalle: {e}")
+        def _on_error(err: str):
+            logger.error(f"Error al eliminar credencial vía API: {err}")
+            messagebox.showerror("Error de Conexión", f"No se pudo conectar con el servidor.\nDetalle: {err}")
+
+        threading.Thread(target=_fetch, daemon=True).start()
 
     def abrir_ventana_editar(self, credencial_id: str, sitio_web: str, login_user: str, categoria_nombre: str):
         EditarCredencialWindow(
@@ -1038,7 +1367,7 @@ class DashboardFrame(ctk.CTkFrame):
             categoria_nombre_actual=categoria_nombre,
             username=self.username,
             master_password=self.master_password,
-            on_save_callback=self.cargar_credenciales
+            on_save_callback=self._on_credencial_editada
         )
 
     def abrir_ventana_agregar(self):
@@ -1046,7 +1375,7 @@ class DashboardFrame(ctk.CTkFrame):
             self,
             username=self.username,
             master_password=self.master_password,
-            on_save_callback=self.cargar_credenciales
+            on_save_callback=self._on_credencial_agregada
         )
 
     def abrir_ventana_generador(self):
@@ -1383,7 +1712,10 @@ class App(ctk.CTk):
         self.access_token = None
         self.refresh_token = None
         self.master_password = None
-        self.handle_logout()
+        try:
+            self.after(0, self.handle_logout)
+        except Exception:
+            pass
         return response
 
     def mostrar_dashboard(self):
@@ -1402,6 +1734,9 @@ class App(ctk.CTk):
 
     def handle_logout(self):
         self.limpiar_portapapeles()
+        # Limpiar explícitamente la caché de credenciales antes de destruir el dashboard
+        if self.dashboard_frame and hasattr(self.dashboard_frame, '_credenciales_cache'):
+            self.dashboard_frame._credenciales_cache = []
         self.username = None
         self.master_password = None
         self.access_token = None
