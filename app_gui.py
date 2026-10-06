@@ -311,6 +311,25 @@ class AgregarCredencialWindow(ctk.CTkToplevel):
         def _on_result(response):
             if not self.winfo_exists():
                 return
+            if response.status_code == 409:
+                try:
+                    resp_data = response.json()
+                except Exception:
+                    resp_data = {}
+                if resp_data.get("warning") == "duplicate_password":
+                    confirmar = messagebox.askyesno(
+                        "Contraseña repetida",
+                        f"{resp_data.get('error')}\n¿Guardar de todas formas?"
+                    )
+                    if confirmar:
+                        payload["confirm_duplicate"] = True
+                        threading.Thread(target=_fetch, daemon=True).start()
+                    else:
+                        _restore_button()
+                    return
+                self.label_error.configure(text=resp_data.get("error", "Error al guardar la credencial."))
+                _restore_button()
+                return
             if response.status_code == 201:
                 try:
                     resp_data = response.json()
@@ -689,6 +708,25 @@ class EditarCredencialWindow(ctk.CTkToplevel):
 
         def _on_result(response):
             if not self.winfo_exists():
+                return
+            if response.status_code == 409:
+                try:
+                    resp_data = response.json()
+                except Exception:
+                    resp_data = {}
+                if resp_data.get("warning") == "duplicate_password":
+                    confirmar = messagebox.askyesno(
+                        "Contraseña repetida",
+                        f"{resp_data.get('error')}\n¿Guardar de todas formas?"
+                    )
+                    if confirmar:
+                        payload["confirm_duplicate"] = True
+                        threading.Thread(target=_fetch, daemon=True).start()
+                    else:
+                        _restore_button()
+                    return
+                self.label_error.configure(text=resp_data.get("error", "Error al actualizar la credencial."))
+                _restore_button()
                 return
             if response.status_code == 200:
                 try:

@@ -44,7 +44,8 @@ from seguridad import (
     generar_clave_recuperacion,
     normalize_domain,
     generar_par_tokens,
-    verificar_token
+    verificar_token,
+    generar_hash_contrasena
 )
 
 # Importamos la excepción IntegrityError del módulo sqlalchemy.exc
@@ -440,12 +441,16 @@ def get_credentials():
         lista_credenciales = []
         for cred in credenciales_query.all():
             pass_descifrada = descifrar_contrasena(cred.password_cifrada, clave_cifrado)
+            c_at = cred.fecha_creacion.isoformat() if cred.fecha_creacion else (cred.fecha_actualizacion.isoformat() if cred.fecha_actualizacion else None)
+            u_at = cred.fecha_actualizacion.isoformat() if cred.fecha_actualizacion else c_at
             lista_credenciales.append({
                 "id": str(cred.id),
                 "sitio_web": cred.sitio_web,
                 "login_user": cred.login_user,
                 "password": pass_descifrada,
-                "categoria": cred.categoria.nombre if cred.categoria else "Sin Categoría"
+                "categoria": cred.categoria.nombre if cred.categoria else "Sin Categoría",
+                "created_at": c_at,
+                "updated_at": u_at
             })
 
         return jsonify({"credenciales": lista_credenciales}), 200
@@ -496,12 +501,16 @@ def search_credentials():
         lista_resultados = []
         for c in results:
             pass_descifrada = descifrar_contrasena(c.password_cifrada, clave_cifrado)
+            c_at = c.fecha_creacion.isoformat() if c.fecha_creacion else (c.fecha_actualizacion.isoformat() if c.fecha_actualizacion else None)
+            u_at = c.fecha_actualizacion.isoformat() if c.fecha_actualizacion else c_at
             lista_resultados.append({
                 "id": str(c.id),
                 "sitio_web": c.sitio_web,
                 "login_user": c.login_user,
                 "password": pass_descifrada,
-                "categoria": c.categoria.nombre if c.categoria else "Sin Categoría"
+                "categoria": c.categoria.nombre if c.categoria else "Sin Categoría",
+                "created_at": c_at,
+                "updated_at": u_at
             })
 
         return jsonify(lista_resultados), 200
@@ -542,27 +551,33 @@ def add_credential():
             if not usuario or not verificar_hash_maestro(master_password, usuario.master_hash):
                 return jsonify({"error": "Credenciales inválidas"}), 401
 
-            # Prevenir duplicados: ya existe una credencial con el mismo sitio normalizado y login_user
-            existente = session.query(Credencial).filter_by(
-                usuario_id=usuario.id,
-                sitio_web=sitio_web,
-                login_user=login_user
-            ).first()
-            if existente:
-                return jsonify({
-                    "error": "Ya existe una credencial para este sitio y usuario",
-                    "existing_id": str(existente.id)
-                }), 409
-
             # Derivar clave Fernet y cifrar la nueva contraseña
             clave_cifrado = derivar_clave_fernet(master_password, usuario.salt_derivacion)
             pass_cifrada = cifrar_contrasena(password_guardar, clave_cifrado)
+
+            confirm_duplicate = bool(data.get("confirm_duplicate", False))
+            nuevo_hash = generar_hash_contrasena(password_guardar, clave_cifrado)
+
+            if not confirm_duplicate:
+                duplicado = session.query(Credencial).filter_by(
+                    usuario_id=usuario.id,
+                    sitio_web=sitio_web,
+                    login_user=login_user,
+                    password_hash=nuevo_hash
+                ).first()
+                if duplicado:
+                    return jsonify({
+                        "error": "Esta contraseña ya fue utilizada anteriormente para esta cuenta.",
+                        "warning": "duplicate_password",
+                        "existing_id": str(duplicado.id)
+                    }), 409
 
             nueva_cred = Credencial(
                 usuario_id=usuario.id,
                 sitio_web=sitio_web,
                 login_user=login_user,
-                password_cifrada=pass_cifrada
+                password_cifrada=pass_cifrada,
+                password_hash=nuevo_hash
             )
 
             if categoria:
@@ -578,11 +593,19 @@ def add_credential():
             session.add(nueva_cred)
             session.flush()
             cred_id = str(nueva_cred.id)
+            c_at = nueva_cred.fecha_creacion.isoformat() if nueva_cred.fecha_creacion else None
+            u_at = nueva_cred.fecha_actualizacion.isoformat() if nueva_cred.fecha_actualizacion else c_at
 
-        return jsonify({
+        resp = {
             "message": f"Credencial para '{sitio_web}' guardada con éxito",
             "id": cred_id
-        }), 201
+        }
+        if c_at:
+            resp["created_at"] = c_at
+        if u_at:
+            resp["updated_at"] = u_at
+
+        return jsonify(resp), 201
 
     except IntegrityError:
         return jsonify({"error": "Ya existe una credencial para este sitio y usuario"}), 409
@@ -665,18 +688,6 @@ def update_credential():
             nuevo_sitio = normalize_domain(sitio_web) if sitio_web is not None else credencial.sitio_web
             nuevo_login = login_user if login_user is not None else credencial.login_user
 
-            conflicto = session.query(Credencial).filter(
-                Credencial.usuario_id == usuario.id,
-                Credencial.sitio_web == nuevo_sitio,
-                Credencial.login_user == nuevo_login,
-                Credencial.id != cred_uuid
-            ).first()
-            if conflicto:
-                return jsonify({
-                    'error': 'Ya existe una credencial para este sitio y usuario',
-                    'existing_id': str(conflicto.id)
-                }), 409
-
             if sitio_web is not None:
                 credencial.sitio_web = nuevo_sitio
             if login_user is not None:
@@ -685,6 +696,27 @@ def update_credential():
             if new_password:
                 clave_cifrado = derivar_clave_fernet(master_password, usuario.salt_derivacion)
                 pass_cifrada = cifrar_contrasena(new_password, clave_cifrado)
+
+                confirm_duplicate = bool(data.get("confirm_duplicate", False))
+                nuevo_hash = generar_hash_contrasena(new_password, clave_cifrado)
+
+                if not confirm_duplicate:
+                    duplicado = session.query(Credencial).filter(
+                        Credencial.usuario_id == usuario.id,
+                        Credencial.sitio_web == nuevo_sitio,
+                        Credencial.login_user == nuevo_login,
+                        Credencial.password_hash == nuevo_hash,
+                        Credencial.id != cred_uuid
+                    ).first()
+                    if duplicado:
+                        session.rollback()
+                        return jsonify({
+                            "error": "Esta contraseña ya fue utilizada anteriormente para esta cuenta.",
+                            "warning": "duplicate_password",
+                            "existing_id": str(duplicado.id)
+                        }), 409
+
+                credencial.password_hash = nuevo_hash
                 credencial.password_cifrada = pass_cifrada
 
             if categoria is not None:
@@ -699,7 +731,14 @@ def update_credential():
                 else:
                     credencial.categoria = None
 
-        return jsonify({'message': 'Credencial actualizada con éxito'}), 200
+            session.flush()
+            u_at = credencial.fecha_actualizacion.isoformat() if credencial.fecha_actualizacion else None
+
+        resp = {'message': 'Credencial actualizada con éxito'}
+        if u_at:
+            resp['updated_at'] = u_at
+
+        return jsonify(resp), 200
 
     except IntegrityError:
         return jsonify({'error': 'Ya existe una credencial para este sitio y usuario'}), 409

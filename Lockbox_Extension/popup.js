@@ -353,17 +353,19 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       showStatus("Cifrando y guardando...", "info");
 
+      const payloadOriginal = {
+        username: data.currentUser,
+        master_password: data.masterPassword,
+        sitio_web: sitioWeb,
+        login_user: loginUser,
+        password: password
+      };
+
       try {
         const response = await authFetch(`${API_URL}/credentials/add`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            username: data.currentUser,
-            master_password: data.masterPassword,
-            sitio_web: sitioWeb,
-            login_user: loginUser,
-            password: password
-          })
+          body: JSON.stringify(payloadOriginal)
         });
 
         const resData = await response.json();
@@ -371,8 +373,24 @@ document.addEventListener("DOMContentLoaded", async () => {
         if (response.ok) {
           showStatus(`¡'${sitioWeb}' cifrado y guardado con éxito!`, "success");
           viewAdd.reset();
+        } else if (response.status === 409 && resData.warning === "duplicate_password") {
+          const confirmar = confirm(`${resData.error} ¿Guardar de todas formas?`);
+          if (confirmar) {
+            const retryResponse = await authFetch(`${API_URL}/credentials/add`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ ...payloadOriginal, confirm_duplicate: true })
+            });
+            const retryData = await retryResponse.json();
+            if (retryResponse.ok) {
+              showStatus(`¡'${sitioWeb}' cifrado y guardado con éxito!`, "success");
+              viewAdd.reset();
+            } else {
+              showStatus(retryData.error || "Error al guardar", "error");
+            }
+          }
         } else if (response.status === 409) {
-          showStatus(resData.error || "Ya existe una credencial para este sitio y usuario", "error");
+          showStatus(resData.error || "Error al guardar", "error");
         } else {
           showStatus(resData.error || "Error al guardar", "error");
         }
@@ -664,30 +682,45 @@ document.addEventListener("DOMContentLoaded", async () => {
         const nuevaPassword = prompt("Editar contraseña (déjalo igual si no quieres cambiarla):", c.password);
         if (nuevaPassword === null) return;
 
+        const passwordCambio = (nuevaPassword !== c.password);
+
         chrome.storage.session.get(["currentUser", "masterPassword"], async (data) => {
           if (!data.currentUser || !data.masterPassword) return;
 
-          try {
+          const payload = {
+            id: c.id,
+            username: data.currentUser,
+            master_password: data.masterPassword,
+            sitio_web: sitioNormalizado,
+            login_user: nuevoUsuario
+          };
+          if (passwordCambio) {
+            payload.password = nuevaPassword;
+          }
+
+          const doUpdate = async (extraFields) => {
+            const body = { ...payload, ...(extraFields || {}) };
             const res = await authFetch(`${API_URL}/credentials/update`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                id: c.id,
-                username: data.currentUser,
-                master_password: data.masterPassword,
-                sitio_web: sitioNormalizado,
-                login_user: nuevoUsuario,
-                password: nuevaPassword
-              })
+              body: JSON.stringify(body)
             });
-
+            const resData = await res.json();
             if (res.ok) {
               showStatus("Credencial actualizada con éxito", "success");
-              btnSearch.click(); // Recargar la lista
+              btnSearch.click();
+            } else if (res.status === 409 && resData.warning === "duplicate_password" && !extraFields?.confirm_duplicate) {
+              const confirmar = confirm(`${resData.error} ¿Guardar de todas formas?`);
+              if (confirmar) {
+                await doUpdate({ confirm_duplicate: true });
+              }
             } else {
-              const resData = await res.json();
               showStatus(resData.error || "Error al actualizar", "error");
             }
+          };
+
+          try {
+            await doUpdate();
           } catch (e) {
             showStatus("Error de conexión al actualizar", "error");
           }

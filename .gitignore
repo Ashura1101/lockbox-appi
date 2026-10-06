@@ -3,4 +3,30 @@ venv/
 __pycache__/
 build/
 dist/
-*.spec 
+*.spec
+
+# Flutter/Dart
+lockbox_mobile/.dart_tool/
+lockbox_mobile/build/
+lockbox_mobile/.flutter-plugins
+lockbox_mobile/.flutter-plugins-dependencies
+lockbox_mobile/.packages
+lockbox_mobile/.pub-cache/
+lockbox_mobile/.pub/
+
+# Android (Flutter)
+lockbox_mobile/android/local.properties
+lockbox_mobile/android/key.properties
+lockbox_mobile/android/.gradle/
+lockbox_mobile/android/app/.cxx/
+*.jks
+*.keystore
+
+# iOS (Flutter)
+lockbox_mobile/ios/Pods/
+lockbox_mobile/ios/.symlinks/
+lockbox_mobile/ios/Flutter/ephemeral/
+
+# Artefactos generados (no deben versionarse)
+repomix-output.xml
+repomix-output*.xml 

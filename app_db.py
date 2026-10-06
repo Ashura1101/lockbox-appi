@@ -187,6 +187,20 @@ class Credencial(Base):
         LargeBinary,
         nullable=False
     )
+    # Hash determinístico (HMAC-SHA256, hex) de la contraseña en texto plano, usado
+    # solo para detectar reutilización de contraseñas. Nunca permite recuperar la
+    # contraseña original. NULL en filas creadas antes de este cambio (backfill
+    # perezoso: se calcula la primera vez que la fila se actualiza).
+    password_hash: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True
+    )
+    # Marca de tiempo de creación oficial (inmutable)
+    fecha_creacion: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=func.now(),
+        nullable=False
+    )
     # Marca de tiempo de la última modificación
     fecha_actualizacion: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -305,6 +319,25 @@ def init_db() -> bool:
             logger.info("Columna 'recovery_key_hash' verificada/creada con éxito.")
         except Exception as e:
             logger.warning(f"No se pudo asegurar la columna 'recovery_key_hash' mediante ALTER TABLE (puede no ser compatible o ya existir): {e}")
+
+        # Asegurar que la columna password_hash exista (en caso de que la tabla ya exista de antes)
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE credenciales ADD COLUMN IF NOT EXISTS password_hash VARCHAR(64);"))
+            logger.info("Columna 'password_hash' verificada/creada con éxito.")
+        except Exception as e:
+            logger.warning(f"No se pudo asegurar la columna 'password_hash' mediante ALTER TABLE (puede no ser compatible o ya existir): {e}")
+
+        # Asegurar columna fecha_creacion y migración idempotente para registros históricos
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE credenciales ADD COLUMN IF NOT EXISTS fecha_creacion TIMESTAMP WITH TIME ZONE;"))
+                conn.execute(text("UPDATE credenciales SET fecha_creacion = fecha_actualizacion WHERE fecha_creacion IS NULL;"))
+                conn.execute(text("ALTER TABLE credenciales ALTER COLUMN fecha_creacion SET DEFAULT NOW();"))
+                conn.execute(text("ALTER TABLE credenciales ALTER COLUMN fecha_creacion SET NOT NULL;"))
+            logger.info("Columna 'fecha_creacion' verificada/migrada con éxito.")
+        except Exception as e:
+            logger.warning(f"No se pudo asegurar la columna 'fecha_creacion' mediante ALTER TABLE: {e}")
 
         # Poblar categorías por defecto
         with SessionLocal() as session:

@@ -2,6 +2,8 @@ import os
 import uuid
 import base64
 import bcrypt
+import hmac
+import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 import jwt
@@ -132,6 +134,16 @@ def descifrar_contrasena(datos_cifrados: bytes, clave_derivada: bytes) -> str:
     datos_descifrados = f.decrypt(datos_bytes)
     return datos_descifrados.decode('utf-8')
 
+
+def generar_hash_contrasena(password_plana: str, clave_derivada: bytes) -> str:
+    """
+    Hash determinístico (HMAC-SHA256, hexadecimal) de una contraseña, usando la
+    misma clave Fernet derivada de la contraseña maestra del usuario. Permite
+    detectar si una contraseña ya fue usada antes para el mismo sitio/usuario,
+    sin almacenar ni poder recuperar la contraseña en texto plano, y sin que sea
+    comparable entre usuarios distintos (cada uno deriva una clave distinta).
+    """
+    return hmac.new(clave_derivada, password_plana.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def generar_contrasena_segura(longitud: int = 16) -> str:
