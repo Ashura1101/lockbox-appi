@@ -1113,6 +1113,7 @@ class DashboardFrame(ctk.CTkFrame):
             # Invalidar respuestas en vuelo antes de modificar la caché
             self._load_generation += 1
             self._credenciales_cache.append(new_cred)
+        self._ultima_firma_render = None
         self._filtrar_y_renderizar()
 
     def _on_credencial_editada(self, updated_fields: dict):
@@ -1137,6 +1138,7 @@ class DashboardFrame(ctk.CTkFrame):
                     merged["updated_at"] = updated_fields["updated_at"]
                 self._credenciales_cache[i] = merged
                 break
+        self._ultima_firma_render = None
         self._filtrar_y_renderizar()
 
     def _on_credencial_eliminada(self, cred_id: str, sitio_web: str):
@@ -1145,6 +1147,7 @@ class DashboardFrame(ctk.CTkFrame):
         self._load_generation += 1
         self._credenciales_cache = [c for c in self._credenciales_cache if c.get("id") != cred_id]
         self.mostrar_notificacion_temporal(f"Credencial '{sitio_web}' eliminada.")
+        self._ultima_firma_render = None
         self._filtrar_y_renderizar()
 
     def mostrar_mensaje_vacio(self):
