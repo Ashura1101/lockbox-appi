@@ -5,6 +5,12 @@ import customtkinter as ctk
 from typing import Callable
 import requests
 import threading
+import ctypes
+
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(1)
+except Exception:
+    pass
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("lockbox_theme.json")
@@ -194,6 +200,15 @@ class AgregarCredencialWindow(ctk.CTkToplevel):
         )
         self.label_error.pack(pady=(0, 4))
 
+        # Indicador de carga
+        self.label_loading = ctk.CTkLabel(
+            self,
+            text="",
+            text_color="#FBBF24",
+            font=ctk.CTkFont(size=12)
+        )
+        self.label_loading.pack(pady=(0, 2))
+
         # Botón de guardar
         self.btn_guardar = ctk.CTkButton(
             self,
@@ -368,8 +383,10 @@ class AgregarCredencialWindow(ctk.CTkToplevel):
         def _restore_button():
             if self.winfo_exists():
                 self.btn_guardar.configure(state="normal", text="Guardar Credencial")
+                self.label_loading.configure(text="")
 
         self.btn_guardar.configure(state="disabled", text="Guardando...")
+        self.label_loading.configure(text="Guardando...")
         threading.Thread(target=_fetch, daemon=True).start()
 
 
@@ -604,6 +621,10 @@ class EditarCredencialWindow(ctk.CTkToplevel):
         self.label_error = ctk.CTkLabel(self, text="", text_color="#FF3333", font=ctk.CTkFont(size=12))
         self.label_error.pack(pady=4)
 
+        # Indicador de carga
+        self.label_loading = ctk.CTkLabel(self, text="", text_color="#FBBF24", font=ctk.CTkFont(size=12))
+        self.label_loading.pack(pady=4)
+
         self.btn_guardar_cambios = ctk.CTkButton(
             self,
             text="Guardar Cambios",
@@ -765,8 +786,10 @@ class EditarCredencialWindow(ctk.CTkToplevel):
         def _restore_button():
             if self.winfo_exists():
                 self.btn_guardar_cambios.configure(state="normal", text="Guardar Cambios")
+                self.label_loading.configure(text="")
 
         self.btn_guardar_cambios.configure(state="disabled", text="Guardando...")
+        self.label_loading.configure(text="Guardando...")
         threading.Thread(target=_fetch, daemon=True).start()
 
 
@@ -1350,6 +1373,11 @@ class DashboardFrame(ctk.CTkFrame):
         )
         if not confirmar:
             return
+
+        if self._notif_timer:
+            self.after_cancel(self._notif_timer)
+            self._notif_timer = None
+        self.label_notificacion.configure(text="Eliminando...", text_color="#FBBF24")
 
         def _fetch():
             try:
