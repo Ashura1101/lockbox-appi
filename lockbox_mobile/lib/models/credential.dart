@@ -33,4 +33,18 @@ class Credential {
       'categoria': categoria,
     };
   }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is Credential &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          sitioWeb == other.sitioWeb &&
+          loginUser == other.loginUser &&
+          password == other.password &&
+          categoria == other.categoria;
+
+  @override
+  int get hashCode => Object.hash(id, sitioWeb, loginUser, password, categoria);
 }

@@ -90,13 +90,26 @@ class VaultRepository {
   /// Fusiona credenciales traídas del servidor en la BD local, evitando
   /// duplicados (upsert por remote_id) y respetando los items no sincronizados.
   Future<void> syncCredentials(List<Map<String, dynamic>> credentials) async {
+    final validRemoteIds = <String>{};
+
     for (final cred in credentials) {
+      final remoteId = cred['id']?.toString() ?? '';
+      if (remoteId.isNotEmpty) {
+        validRemoteIds.add(remoteId);
+      }
       await _db.upsertVaultItem(
-        remoteId: cred['id']?.toString() ?? '',
+        remoteId: remoteId,
         title: cred['sitio_web'] as String? ?? '',
         username: cred['login_user'] as String? ?? '',
         encryptedPassword: cred['password'] as String? ?? '',
+        categoria: cred['categoria'] as String?,
       );
     }
+
+    // Reconciliación autoritativa del servidor:
+    // Elimina registros locales previamente sincronizados (is_synced = 1)
+    // que fueron eliminados en el servidor, pero NUNCA toca registros pendientes
+    // de sincronización (is_synced = 0) para no romper el modo offline.
+    await _db.deleteOrphanedSyncedItems(validRemoteIds);
   }
 }

@@ -19,8 +19,9 @@ class LocalDatabaseService {
 
     return await openDatabase(
       path,
-      version: 1,
+      version: 2,
       onCreate: _createDB,
+      onUpgrade: _onUpgrade,
     );
   }
 
@@ -32,10 +33,17 @@ class LocalDatabaseService {
         title TEXT NOT NULL,
         username TEXT NOT NULL,
         encrypted_password TEXT NOT NULL,
+        categoria TEXT,
         updated_at TEXT NOT NULL,
         is_synced INTEGER NOT NULL DEFAULT 0
       )
     ''');
+  }
+
+  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      await db.execute('ALTER TABLE vault_items ADD COLUMN categoria TEXT');
+    }
   }
 
   Future<int> insertVaultItem(Map<String, dynamic> item) async {
@@ -63,6 +71,7 @@ class LocalDatabaseService {
     required String title,
     required String username,
     required String encryptedPassword,
+    String? categoria,
   }) async {
     final db = await instance.database;
     final existing = await db.query(
@@ -80,6 +89,7 @@ class LocalDatabaseService {
           'title': title,
           'username': username,
           'encrypted_password': encryptedPassword,
+          'categoria': categoria,
           'updated_at': now,
           'is_synced': 1,
         },
@@ -92,9 +102,39 @@ class LocalDatabaseService {
         'title': title,
         'username': username,
         'encrypted_password': encryptedPassword,
+        'categoria': categoria,
         'updated_at': now,
         'is_synced': 1,
       });
+    }
+  }
+
+  /// Elimina registros locales que ya fueron sincronizados previamente (`is_synced = 1`),
+  /// pero cuyo `remote_id` ya no existe en el conjunto de IDs autoritativos devueltos por el servidor.
+  ///
+  /// NUNCA elimina registros locales pendientes de sincronización (`is_synced = 0`).
+  Future<void> deleteOrphanedSyncedItems(Set<String> validRemoteIds) async {
+    final db = await instance.database;
+    final existingSynced = await db.query(
+      'vault_items',
+      columns: ['id', 'remote_id'],
+      where: 'is_synced = 1 AND remote_id IS NOT NULL',
+    );
+
+    final idsToDelete = <int>[];
+    for (final row in existingSynced) {
+      final remoteId = row['remote_id'] as String?;
+      if (remoteId != null && remoteId.isNotEmpty && !validRemoteIds.contains(remoteId)) {
+        idsToDelete.add(row['id'] as int);
+      }
+    }
+
+    if (idsToDelete.isNotEmpty) {
+      final batch = db.batch();
+      for (final id in idsToDelete) {
+        batch.delete('vault_items', where: 'id = ?', whereArgs: [id]);
+      }
+      await batch.commit(noResult: true);
     }
   }
 }

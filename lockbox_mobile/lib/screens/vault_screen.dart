@@ -47,7 +47,8 @@ class _VaultScreenState extends State<VaultScreen> {
   List<dynamic> _filtrar(List<dynamic> credenciales) {
     return credenciales.where((cred) {
       final coincideCategoria = _categoriaSeleccionada == 'Todas' ||
-          (cred.categoria ?? '') == _categoriaSeleccionada;
+          (cred.categoria ?? '').trim().toLowerCase() ==
+              _categoriaSeleccionada.trim().toLowerCase();
       final q = _query.trim().toLowerCase();
       final coincideTexto = q.isEmpty ||
           cred.sitioWeb.toLowerCase().contains(q) ||
@@ -197,7 +198,7 @@ class _VaultScreenState extends State<VaultScreen> {
                         )
                       : RefreshIndicator(
                           onRefresh: () =>
-                              context.read<AuthController>().loadCredentials(),
+                              context.read<AuthController>().refreshCredentials(),
                           child: ListView.builder(
                             physics: const AlwaysScrollableScrollPhysics(),
                             padding: const EdgeInsets.only(bottom: 88),

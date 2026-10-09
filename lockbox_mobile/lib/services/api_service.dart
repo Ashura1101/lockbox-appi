@@ -191,8 +191,9 @@ class ApiService {
     throw ApiException(body['error'] ?? 'Error al obtener credenciales', response.statusCode);
   }
 
-  /// Guarda una nueva credencial cifrada.
-  Future<void> addCredential({
+  /// Guarda una nueva credencial cifrada y retorna el ID real asignado por el
+  /// servidor (campo "id" de la respuesta HTTP 201).
+  Future<String> addCredential({
     required String username,
     required String masterPassword,
     required String sitioWeb,
@@ -225,6 +226,11 @@ class ApiService {
     if (response.statusCode != 201) {
       throw ApiException(body['error'] ?? 'Error al guardar la credencial', response.statusCode);
     }
+    final id = body['id']?.toString();
+    if (id == null || id.isEmpty) {
+      throw const ApiException('El servidor no devolvió un ID válido', 500);
+    }
+    return id;
   }
 
   /// Actualiza una credencial existente.

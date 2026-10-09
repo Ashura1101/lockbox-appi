@@ -47,9 +47,11 @@ class _AddCredentialScreenState extends State<AddCredentialScreen> {
     super.initState();
     _passwordController.addListener(_onPasswordChanged);
     final cred = widget.credential;
-    _categoria = _categorias.contains(cred?.categoria ?? '')
-        ? cred!.categoria!
-        : 'Otros';
+    final credCat = cred?.categoria?.trim().toLowerCase();
+    _categoria = _categorias.firstWhere(
+      (c) => c.toLowerCase() == credCat,
+      orElse: () => 'Otros',
+    );
     if (cred != null) {
       _siteController.text = cred.sitioWeb;
       _userController.text = cred.loginUser;
