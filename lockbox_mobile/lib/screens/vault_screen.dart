@@ -28,6 +28,7 @@ class _VaultScreenState extends State<VaultScreen> {
   final _searchController = TextEditingController();
   String _query = '';
   String _categoriaSeleccionada = 'Todas';
+  final Set<String> _eliminando = <String>{};
 
   @override
   void initState() {
@@ -94,6 +95,8 @@ class _VaultScreenState extends State<VaultScreen> {
 
     if (confirm != true) return;
     if (!mounted) return;
+    if (_eliminando.contains(cred.id)) return;
+    setState(() => _eliminando.add(cred.id));
     final auth = context.read<AuthController>();
     try {
       await auth.deleteCredential(cred.id);
@@ -102,6 +105,8 @@ class _VaultScreenState extends State<VaultScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Error al eliminar: $e')),
       );
+    } finally {
+      if (mounted) setState(() => _eliminando.remove(cred.id));
     }
   }
 
@@ -207,6 +212,7 @@ class _VaultScreenState extends State<VaultScreen> {
                               final cred = filtradas[index];
                               return _CredentialCard(
                                 cred: cred,
+                                isDeleting: _eliminando.contains(cred.id),
                                 onTap: () {
                                   Navigator.of(context).push(
                                     MaterialPageRoute(
@@ -234,17 +240,19 @@ class _CredentialCard extends StatelessWidget {
   final VoidCallback onTap;
   final VoidCallback onCopy;
   final VoidCallback onDelete;
+  final bool isDeleting;
 
   const _CredentialCard({
     required this.cred,
     required this.onTap,
     required this.onCopy,
     required this.onDelete,
+    this.isDeleting = false,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    final card = Container(
       margin: const EdgeInsets.only(bottom: 12),
       decoration: BoxDecoration(
         color: const Color(0xFF1E1B2E),
@@ -262,24 +270,37 @@ class _CredentialCard extends StatelessWidget {
           style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
         ),
         subtitle: Text(
-          cred.loginUser,
-          style: const TextStyle(color: Colors.white60),
+          isDeleting ? 'Eliminando credencial...' : cred.loginUser,
+          style: TextStyle(
+            color: isDeleting ? const Color(0xFFFBBF24) : Colors.white60,
+          ),
         ),
-        onTap: onTap,
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            IconButton(
-              icon: const Icon(Icons.copy_rounded, color: Colors.white70),
-              onPressed: onCopy,
-            ),
-            IconButton(
-              icon: const Icon(Icons.delete_outline_rounded, color: Colors.redAccent),
-              onPressed: onDelete,
-            ),
-          ],
-        ),
+        onTap: isDeleting ? null : onTap,
+        trailing: isDeleting
+            ? const SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.copy_rounded, color: Colors.white70),
+                    onPressed: onCopy,
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.delete_outline_rounded, color: Colors.redAccent),
+                    onPressed: onDelete,
+                  ),
+                ],
+              ),
       ),
     );
+
+    if (isDeleting) {
+      return Opacity(opacity: 0.55, child: card);
+    }
+    return card;
   }
 }
