@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../controllers/auth_controller.dart';
+import '../core/error_messages.dart';
 import '../models/credential.dart';
 import '../services/secure_clipboard_service.dart';
 import 'add_credential_screen.dart';
@@ -103,7 +104,7 @@ class _VaultScreenState extends State<VaultScreen> {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error al eliminar: $e')),
+        SnackBar(content: Text(mensajeDeError(e, accion: 'eliminar la credencial'))),
       );
     } finally {
       if (mounted) setState(() => _eliminando.remove(cred.id));

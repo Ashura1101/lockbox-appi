@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../controllers/auth_controller.dart';
+import '../core/error_messages.dart';
 import '../models/credential.dart';
 import '../services/api_service.dart';
 import '../widgets/password_strength.dart';
@@ -152,12 +153,12 @@ class _AddCredentialScreenState extends State<AddCredentialScreen> {
             await guardar(confirmDuplicate: true);
             if (mounted) Navigator.of(context).pop();
           } catch (e2) {
-            setState(() => _error = e2.toString());
+            setState(() => _error = mensajeDeError(e2, accion: _isEditing ? 'guardar los cambios' : 'guardar la credencial'));
           }
         }
         return;
       }
-      setState(() => _error = e.toString());
+      setState(() => _error = mensajeDeError(e, accion: _isEditing ? 'guardar los cambios' : 'guardar la credencial'));
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }

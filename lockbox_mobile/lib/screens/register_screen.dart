@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../controllers/auth_controller.dart';
+import '../core/error_messages.dart';
 import 'login_screen.dart';
 
 /// Pantalla de registro de un nuevo usuario.
@@ -57,7 +58,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
       );
       setState(() => _recoveryKey = recoveryKey);
     } catch (e) {
-      setState(() => _error = e.toString());
+      setState(() => _error = mensajeDeError(e, accion: 'crear la cuenta'));
     } finally {
       setState(() => _isLoading = false);
     }

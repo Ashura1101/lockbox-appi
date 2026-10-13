@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../controllers/auth_controller.dart';
+import '../core/error_messages.dart';
 import 'register_screen.dart';
 
 /// Pantalla de inicio de sesión con soporte opcional de inicio biométrico.
@@ -50,7 +51,7 @@ class _LoginScreenState extends State<LoginScreen> {
         enableBiometric: _enableBiometric && _biometricAvailable,
       );
     } catch (e) {
-      setState(() => _error = e.toString());
+      setState(() => _error = mensajeDeError(e, accion: 'iniciar sesión'));
     }
   }
 
