@@ -48,6 +48,9 @@ from seguridad import (
     generar_hash_contrasena
 )
 
+# Valores por defecto seguros (DIS-03): modo debug, orígenes CORS
+from config_segura import cabeceras_seguridad, modo_debug, resolver_origenes_permitidos
+
 # Importamos la excepción IntegrityError del módulo sqlalchemy.exc
 # IntegrityError se utiliza para manejar errores relacionados con la integridad de los datos en una base de datos SQL
 from sqlalchemy.exc import IntegrityError
@@ -99,17 +102,14 @@ DEFAULT_ALLOWED_ORIGINS = [
     "http://localhost:8000",
 ]
 
-# Obtenemos el valor de la variable de entorno "ALLOWED_ORIGINS" y lo asignamos a la variable raw_allowed_origins
-raw_allowed_origins = os.getenv("ALLOWED_ORIGINS")
+# Modo debug: solo es True si FLASK_DEBUG vale exactamente "true". Por defecto, producción.
+DEBUG_MODE = modo_debug(os.getenv("FLASK_DEBUG"))
 
-# Verificamos si raw_allowed_origins no es None ni una cadena vacía
-if raw_allowed_origins:
-    # Si raw_allowed_origins no es None ni una cadena vacía, lo dividimos por comas para obtener una lista de orígenes permitidos
-    # Luego, eliminamos cualquier espacio en blanco al principio o al final de cada origen y filtramos los orígenes vacíos
-    ALLOWED_ORIGINS = [o.strip() for o in raw_allowed_origins.split(",") if o.strip()]
-else:
-    # Si raw_allowed_origins es None o una cadena vacía, asignamos la lista de orígenes permitidos por defecto
-    ALLOWED_ORIGINS = list(DEFAULT_ALLOWED_ORIGINS)
+# DIS-03 (seguro por defecto): si falta ALLOWED_ORIGINS, los orígenes locales de desarrollo
+# SOLO se aceptan en modo debug. En producción la lista queda vacía (ningún sitio web externo
+# puede llamar a la API desde un navegador) hasta que se configure explícitamente.
+raw_allowed_origins = os.getenv("ALLOWED_ORIGINS")
+ALLOWED_ORIGINS = resolver_origenes_permitidos(raw_allowed_origins, DEBUG_MODE, DEFAULT_ALLOWED_ORIGINS)
 
 # Soporte opcional para EXTENSION_ID (siguiendo el patrón observado en api.py)
 extension_id = os.getenv("EXTENSION_ID")
@@ -143,6 +143,9 @@ logging.basicConfig(level=logging.INFO)
 # Un logger es un objeto que registra mensajes de diferecntes niveles
 logger = logging.getLogger("app_api")
 
+if not ALLOWED_ORIGINS:
+    logger.info("CORS: sin orígenes web permitidos (ALLOWED_ORIGINS no definido y modo debug desactivado).")
+
 # ==========================================
 # RATE LIMITER — Protección contra fuerza bruta
 # ==========================================
@@ -162,12 +165,10 @@ limiter = Limiter(
 # app.after_request es un decorador que se ejecuta después de cada petición
 @app.after_request
 def apply_security_headers(response):
-    # Añade cabeceras de seguridad a la respuesta para proteger la aplicación de vulnerabilidades
-    response.headers['X-Content-Type-Options'] = 'nosniff'
-    # Establece el encabezado X-Frame-Options para evitar qu la página se cargue dentro de un iframe
-    response.headers['X-Frame-Options'] = 'DENY'
-    # Establece el encabezado Content-Security-Policy para evitar ataques XSS
-    response.headers['Content-Security-Policy'] = "default-src 'none'"
+    # Añade cabeceras de seguridad a la respuesta (nosniff, X-Frame-Options, CSP, y desde DIS-03
+    # también Cache-Control: no-store y HSTS sobre HTTPS). Ver config_segura.cabeceras_seguridad.
+    # ProxyFix hace que request.is_secure refleje X-Forwarded-Proto del proxy de Render.
+    response.headers.update(cabeceras_seguridad(request.is_secure))
     # Devuelve la respuesta con los encabezados de seguridad aplicados
     return response
 
@@ -818,6 +819,6 @@ def ratelimit_handler(e):
 
 
 if __name__ == "__main__":
-    DEBUG_MODE = os.getenv("FLASK_DEBUG", "False").lower() == "true"
+    # DEBUG_MODE se calcula al inicio del módulo (por defecto False).
     print(f"🚀 Servidor API iniciando en http://127.0.0.1:5000 (Debug: {DEBUG_MODE})")
     app.run(debug=DEBUG_MODE, port=5000)

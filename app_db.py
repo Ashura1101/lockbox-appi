@@ -26,6 +26,8 @@ from sqlalchemy.orm import (
 )
 from sqlalchemy.exc import SQLAlchemyError
 
+from config_segura import exigir_ssl_por_defecto
+
 # Configuración del sistema de logging para trazabilidad y depuración en producción
 logging.basicConfig(
     level=logging.INFO,
@@ -55,12 +57,18 @@ else:
         DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
 
 try:
+    # DIS-03 (seguro por defecto): si la URL no indica sslmode y la base de datos no es local,
+    # se exige TLS (sslmode=require). Sin esto, psycopg2 usa "prefer" y puede caer a texto plano.
+    # Una URL con sslmode explícito (p. ej. ?sslmode=disable en desarrollo) se respeta.
+    _connect_args = {"sslmode": "require"} if exigir_ssl_por_defecto(DATABASE_URL) else {}
+
     # Creación del motor de SQLAlchemy con pool de conexiones configurado
     engine = create_engine(
         DATABASE_URL,
         pool_pre_ping=True,      # Verifica la validez de la conexión antes de usarla
         pool_recycle=3600,       # Recicla conexiones después de una hora
-        echo=False               # Establecer en True para depuración de consultas SQL
+        echo=False,              # Establecer en True para depuración de consultas SQL
+        connect_args=_connect_args
     )
     # Fábrica de sesiones configurada para no hacer commit ni autoflush automático
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

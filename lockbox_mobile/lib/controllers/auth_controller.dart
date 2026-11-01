@@ -78,8 +78,8 @@ class AuthController extends ChangeNotifier {
   }
 
   /// Restaura la sesión guardada (tokens + usuario) al abrir la app.
-  /// Si la biometría está habilitada, deja la bóveda bloqueada hasta
-  /// que el usuario se autentique con huella/Face ID o contraseña maestra.
+  /// Deja la bóveda bloqueada hasta que el usuario se autentique con
+  /// huella/Face ID (si la activó) o con su contraseña maestra.
   Future<void> restoreSession() async {
     final storedUser = await tokenStorage.username;
     final storedAccess = await tokenStorage.accessToken;
@@ -103,19 +103,26 @@ class AuthController extends ChangeNotifier {
         }
       }
 
-      // Se bloquea la bóveda siempre que la biometría está habilitada en
-      // preferencias, sin importar si el sensor biométrico está listo o no.
-      // Si la biometría no está disponible, el usuario usará el fallback
-      // de contraseña maestra en lugar de abrir el vault sin autenticación.
-      final biometricEnabled = await tokenStorage.isBiometricEnabled();
-      _isLocked = biometricEnabled;
+      // DIS-03 (seguro por defecto): la bóveda SIEMPRE arranca bloqueada al
+      // restaurar una sesión guardada, tenga o no activada la biometría.
+      // Sin biometría (o si no está disponible) se pide la contraseña maestra
+      // en la pantalla de bloqueo; nunca se abre la bóveda sin autenticación.
+      _isLocked = true;
       notifyListeners();
     }
   }
 
-  /// Autentica con biometría si está habilitada. Retorna true si continúa.
+  /// Indica si el usuario activó la biometría como método de desbloqueo.
+  Future<bool> isBiometricEnabled() => tokenStorage.isBiometricEnabled();
+
+  /// Autentica con biometría. Retorna true solo si el usuario se autenticó.
+  ///
+  /// DIS-03 / DIS-04 (seguro por defecto y fallar cerrado): si la biometría no
+  /// está activada, no está disponible o falla, el resultado es `false`.
+  /// Antes, con la biometría desactivada (el valor por defecto) devolvía
+  /// `true` y la pantalla de bloqueo se abría sin pedir nada.
   Future<bool> authenticateWithBiometrics() async {
-    if (!await tokenStorage.isBiometricEnabled()) return true;
+    if (!await tokenStorage.isBiometricEnabled()) return false;
     if (!await biometric.isBiometricAvailable()) return false;
     try {
       return await biometric.authenticate();

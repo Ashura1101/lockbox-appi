@@ -6,6 +6,8 @@ from typing import Callable
 import requests
 import threading
 import ctypes
+import os
+import time
 
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
@@ -19,9 +21,16 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from seguridad import generar_contrasena_segura, normalize_domain
+from config_segura import leer_minutos_autobloqueo, inactividad_superada
 
 # URL de la API desplegada en Render
 API_BASE_URL = "https://lockbox-appi.onrender.com/api"
+
+# DIS-03 (seguro por defecto): la sesión se cierra sola tras 5 minutos sin actividad.
+# Se puede cambiar con LOCKBOX_AUTOBLOQUEO_MIN (1 a 60); no se puede desactivar.
+AUTOBLOQUEO_SEGUNDOS = leer_minutos_autobloqueo(os.getenv("LOCKBOX_AUTOBLOQUEO_MIN")) * 60
+# Cada cuántos milisegundos se comprueba la inactividad.
+INTERVALO_COMPROBACION_MS = 10_000
 
 # Configuración del logging
 logging.basicConfig(
@@ -1467,8 +1476,42 @@ class App(ctk.CTk):
         self.dashboard_frame = None
         self._clipboard_timer = None
 
+        # Autobloqueo por inactividad (DIS-03): cualquier tecla, clic, rueda o movimiento
+        # en cualquier ventana de la aplicación cuenta como actividad.
+        self._ultima_actividad = time.monotonic()
+        self._vigilancia_id = None
+        for evento in ("<Key>", "<Button>", "<MouseWheel>", "<Motion>"):
+            self.bind_all(evento, self._registrar_actividad, add="+")
+
         self.setup_login_ui()
         self.check_api_connection()
+
+    def _registrar_actividad(self, _event=None):
+        self._ultima_actividad = time.monotonic()
+
+    def _iniciar_vigilancia_inactividad(self):
+        """Empieza a vigilar la inactividad (se llama al abrir la bóveda)."""
+        self._cancelar_vigilancia_inactividad()
+        self._ultima_actividad = time.monotonic()
+        self._vigilancia_id = self.after(INTERVALO_COMPROBACION_MS, self._comprobar_inactividad)
+
+    def _cancelar_vigilancia_inactividad(self):
+        if self._vigilancia_id is not None:
+            try:
+                self.after_cancel(self._vigilancia_id)
+            except Exception:
+                pass
+            self._vigilancia_id = None
+
+    def _comprobar_inactividad(self):
+        self._vigilancia_id = None
+        if self.dashboard_frame is None:
+            return  # No hay sesión abierta que vigilar.
+        if inactividad_superada(self._ultima_actividad, time.monotonic(), AUTOBLOQUEO_SEGUNDOS):
+            logger.info("Sesión cerrada por inactividad.")
+            self.handle_logout(mensaje="Sesión cerrada por inactividad.")
+            return
+        self._vigilancia_id = self.after(INTERVALO_COMPROBACION_MS, self._comprobar_inactividad)
 
     def center_window(self):
         self.update_idletasks()
@@ -1800,8 +1843,10 @@ class App(ctk.CTk):
             on_logout=self.handle_logout
         )
         self.dashboard_frame.pack(fill="both", expand=True)
+        self._iniciar_vigilancia_inactividad()
 
-    def handle_logout(self):
+    def handle_logout(self, mensaje: str = "Sesión cerrada correctamente."):
+        self._cancelar_vigilancia_inactividad()
         self.limpiar_portapapeles()
         # Limpiar explícitamente la caché de credenciales antes de destruir el dashboard
         if self.dashboard_frame and hasattr(self.dashboard_frame, '_credenciales_cache'):
@@ -1816,7 +1861,7 @@ class App(ctk.CTk):
         self.center_window()
 
         self.setup_login_ui()
-        self.show_status("Sesión cerrada correctamente.", is_error=False)
+        self.show_status(mensaje, is_error=False)
 
     def copiar_al_portapapeles(self, texto: str):
         import pyperclip

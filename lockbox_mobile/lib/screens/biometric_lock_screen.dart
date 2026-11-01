@@ -16,6 +16,9 @@ class _BiometricLockScreenState extends State<BiometricLockScreen> {
   final _passwordController = TextEditingController();
   bool _authenticating = false;
   bool _biometricAvailable = true;
+  // DIS-03: la biometría es opcional; hasta comprobar lo contrario se asume
+  // desactivada y se pide la contraseña maestra.
+  bool _biometricEnabled = false;
   bool _showPasswordFallback = false;
   bool _obscurePassword = true;
   String? _error;
@@ -35,18 +38,22 @@ class _BiometricLockScreenState extends State<BiometricLockScreen> {
   Future<void> _initLockScreen() async {
     final auth = context.read<AuthController>();
     final available = await auth.isBiometricAvailable();
+    final enabled = await auth.isBiometricEnabled();
+    final useBiometric = available && enabled;
 
     if (!mounted) return;
 
     setState(() {
       _biometricAvailable = available;
-      if (!available) {
-        // Si no hay biometría disponible, mostrar de inmediato el fallback
+      _biometricEnabled = enabled;
+      if (!useBiometric) {
+        // Sin biometría disponible o sin activar, mostrar de inmediato la
+        // contraseña maestra: es el único método que desbloquea la bóveda.
         _showPasswordFallback = true;
       }
     });
 
-    if (available) {
+    if (useBiometric) {
       _unlockBiometric();
     }
   }
@@ -235,8 +242,9 @@ class _BiometricLockScreenState extends State<BiometricLockScreen> {
 
                 const SizedBox(height: 16),
 
-                // Alternar entre biometría y contraseña maestra si ambas son posibles
-                if (_biometricAvailable) ...[
+                // Alternar entre biometría y contraseña maestra solo si la
+                // biometría está disponible Y el usuario la activó.
+                if (_biometricAvailable && _biometricEnabled) ...[
                   TextButton.icon(
                     onPressed: _authenticating
                         ? null

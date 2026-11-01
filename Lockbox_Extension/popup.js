@@ -208,9 +208,54 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
-  // 1. Comprobar si ya hay una sesión activa guardada
-  chrome.storage.session.get(["currentUser", "masterPassword"], (data) => {
+  // DIS-03 (seguro por defecto): la sesión se cierra sola tras SESSION_IDLE_LIMIT_MS
+  // (5 min, ver session_policy.js) sin actividad. La marca `lastActive` se guarda en
+  // chrome.storage.session junto con la sesión; si falta o es inválida, se cierra la sesión.
+  let lastActiveLocal = Date.now();
+  let lastPersistedAt = 0;
+
+  function touchSession() {
+    const now = Date.now();
+    lastActiveLocal = now;
+    // Se persiste como máximo cada 10 s para no escribir en el almacenamiento en cada tecla.
+    if (now - lastPersistedAt >= 10000) {
+      lastPersistedAt = now;
+      try {
+        chrome.storage.session.set({ lastActive: now });
+      } catch (e) {
+        // Sin almacenamiento de sesión no se puede persistir; la comprobación local sigue activa.
+      }
+    }
+  }
+
+  function endSession(message) {
+    chrome.storage.session.remove(
+      ["accessToken", "refreshToken", "currentUser", "masterPassword", "lastActive"],
+      () => {
+        showLoginView();
+        if (message) showStatus(message, "info");
+      }
+    );
+  }
+
+  ["click", "keydown"].forEach((ev) => document.addEventListener(ev, touchSession, true));
+
+  // Si el popup se queda abierto sin usarse, también se cierra la sesión.
+  setInterval(() => {
+    if (viewMain.classList.contains("hidden")) return; // No hay sesión abierta en pantalla
+    if (isSessionExpired(lastActiveLocal, Date.now())) {
+      endSession("Sesión cerrada por inactividad.");
+    }
+  }, 15000);
+
+  // 1. Comprobar si ya hay una sesión activa guardada (y que no haya caducado por inactividad)
+  chrome.storage.session.get(["currentUser", "masterPassword", "lastActive"], (data) => {
     if (data.currentUser && data.masterPassword) {
+      if (isSessionExpired(data.lastActive, Date.now())) {
+        endSession("Sesión cerrada por inactividad.");
+        return;
+      }
+      touchSession();
       showMainView(data.currentUser);
     } else {
       showLoginView();
@@ -245,7 +290,9 @@ document.addEventListener("DOMContentLoaded", async () => {
             refreshToken: resData.refresh_token
           });
         }
-        chrome.storage.session.set({ currentUser: username, masterPassword: masterPassword }, () => {
+        lastActiveLocal = Date.now();
+        lastPersistedAt = lastActiveLocal;
+        chrome.storage.session.set({ currentUser: username, masterPassword: masterPassword, lastActive: lastActiveLocal }, () => {
           showMainView(username);
         });
       } else {
@@ -258,12 +305,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // 3. Evento de Cerrar Sesión
   btnLogout.addEventListener("click", () => {
-    if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.session) {
-      chrome.storage.session.remove(["accessToken", "refreshToken"]);
-    }
-    chrome.storage.session.remove(["currentUser", "masterPassword"], () => {
-      showLoginView();
-    });
+    endSession();
   });
 
   // Cambiar entre pestañas
@@ -600,10 +642,30 @@ document.addEventListener("DOMContentLoaded", async () => {
       passBold.textContent = "Password: ";
       passLabelSpan.appendChild(passBold);
 
+      // DIS-03 (seguro por defecto): la contraseña se muestra oculta; el usuario decide
+      // revelarla y se vuelve a ocultar sola tras REVEAL_PASSWORD_MS (15 s).
       const passCode = document.createElement("code");
       passCode.style.cssText = "background: #0f172a; padding: 2px 6px; border-radius: 4px; color: #38bdf8;";
-      passCode.textContent = c.password || "";
+      passCode.textContent = PASSWORD_MASK;
       passLabelSpan.appendChild(passCode);
+
+      const btnReveal = document.createElement("button");
+      btnReveal.type = "button";
+      btnReveal.className = "btn-reveal-item";
+      btnReveal.style.cssText = "background:none; border:none; cursor:pointer;";
+      btnReveal.title = "Mostrar contraseña";
+      btnReveal.textContent = "👁️";
+
+      let revealed = false;
+      let revealTimer = null;
+      function setRevealed(value) {
+        revealed = value;
+        passCode.textContent = value ? (c.password || "") : PASSWORD_MASK;
+        btnReveal.title = value ? "Ocultar contraseña" : "Mostrar contraseña";
+        clearTimeout(revealTimer);
+        revealTimer = value ? setTimeout(() => setRevealed(false), REVEAL_PASSWORD_MS) : null;
+      }
+      btnReveal.addEventListener("click", () => setRevealed(!revealed));
 
       const btnCopy = document.createElement("button");
       btnCopy.type = "button";
@@ -612,8 +674,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       btnCopy.title = "Copiar contraseña";
       btnCopy.textContent = "📋";
 
+      const passActions = document.createElement("span");
+      passActions.appendChild(btnReveal);
+      passActions.appendChild(btnCopy);
+
       passRow.appendChild(passLabelSpan);
-      passRow.appendChild(btnCopy);
+      passRow.appendChild(passActions);
 
       // 4. Botón de Auto-llenado
       const btnAutofill = document.createElement("button");
@@ -679,10 +745,12 @@ document.addEventListener("DOMContentLoaded", async () => {
         const nuevoUsuario = prompt("Editar usuario/email:", c.login_user);
         if (nuevoUsuario === null) return;
 
-        const nuevaPassword = prompt("Editar contraseña (déjalo igual si no quieres cambiarla):", c.password);
+        // DIS-03: no se rellena el cuadro con la contraseña actual (quedaría visible en claro).
+        // Vacío = no cambiarla.
+        const nuevaPassword = prompt("Nueva contraseña (déjalo vacío si no quieres cambiarla):", "");
         if (nuevaPassword === null) return;
 
-        const passwordCambio = (nuevaPassword !== c.password);
+        const passwordCambio = (nuevaPassword !== "");
 
         chrome.storage.session.get(["currentUser", "masterPassword"], async (data) => {
           if (!data.currentUser || !data.masterPassword) return;
