@@ -811,6 +811,11 @@ class DashboardFrame(ctk.CTkFrame):
         self._categorias_nombres: list = []   # Nombres de categorías disponibles (caché local)
         self._ultima_firma_render = None      # Firma del último resultado renderizado
 
+        # Bloqueo automático por inactividad (DIS-03)
+        self._inactivity_timeout = 5 * 60 * 1000  # 5 minutos en milisegundos
+        self._inactivity_timer = None
+        self._reset_inactivity_timer()
+
         self.grid_columnconfigure(0, weight=0, minsize=200)
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -989,6 +994,30 @@ class DashboardFrame(ctk.CTkFrame):
             self.after_cancel(self._notif_timer)
 
         self._notif_timer = self.after(4000, lambda: self.label_notificacion.configure(text=""))
+
+    # ============================================
+    # BLOQUEO AUTOMÁTICO POR INACTIVIDAD (DIS-03)
+    # ============================================
+
+    def _reset_inactivity_timer(self):
+        """Reinicia el timer de inactividad. Llámalo en cada interacción del usuario."""
+        if self._inactivity_timer:
+            self.after_cancel(self._inactivity_timer)
+        self._inactivity_timer = self.after(self._inactivity_timeout, self._lock_by_inactivity)
+
+    def _lock_by_inactivity(self):
+        """Cierra la sesión por inactividad."""
+        logger.info("Bloqueo automático por inactividad.")
+        self.on_logout()
+
+    def _bind_inactivity_events(self):
+        """Vincula eventos de usuario para detectar actividad y reiniciar el timer."""
+        # Eventos de teclado y mouse en el frame principal
+        self.bind("<Any-KeyPress>", lambda e: self._reset_inactivity_timer())
+        self.bind("<Any-Button>", lambda e: self._reset_inactivity_timer())
+        # También en la search_entry
+        self.search_entry.bind("<KeyRelease>", lambda e: self._reset_inactivity_timer())
+        self.search_entry.bind("<Button-1>", lambda e: self._reset_inactivity_timer())
 
     def cargar_credenciales(self, on_done=None):
         """Descarga la bóveda completa en un hilo secundario y actualiza la caché local.
@@ -1800,6 +1829,7 @@ class App(ctk.CTk):
             on_logout=self.handle_logout
         )
         self.dashboard_frame.pack(fill="both", expand=True)
+        self.dashboard_frame._bind_inactivity_events()
 
     def handle_logout(self):
         self.limpiar_portapapeles()
