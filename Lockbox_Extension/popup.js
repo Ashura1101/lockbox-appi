@@ -600,10 +600,38 @@ document.addEventListener("DOMContentLoaded", async () => {
       passBold.textContent = "Password: ";
       passLabelSpan.appendChild(passBold);
 
+      // Contenedor para contraseña + botón mostrar/ocultar
+      const passContainer = document.createElement("span");
+      passContainer.style.cssText = "display: inline-flex; align-items: center; gap: 4px;";
+
       const passCode = document.createElement("code");
       passCode.style.cssText = "background: #0f172a; padding: 2px 6px; border-radius: 4px; color: #38bdf8;";
-      passCode.textContent = c.password || "";
-      passLabelSpan.appendChild(passCode);
+      passCode.textContent = "••••••••"; // Por defecto oculta (DIS-03: seguro por defecto)
+      passCode.dataset.realPassword = c.password || ""; // Guardar contraseña real
+      passCode.dataset.hidden = "true";
+      passContainer.appendChild(passCode);
+
+      // Botón mostrar/ocultar contraseña
+      const btnTogglePass = document.createElement("button");
+      btnTogglePass.type = "button";
+      btnTogglePass.style.cssText = "background:none; border:none; cursor:pointer; font-size:12px;";
+      btnTogglePass.title = "Mostrar/Ocultar contraseña";
+      btnTogglePass.textContent = "👁️";
+      
+      btnTogglePass.addEventListener("click", () => {
+        if (passCode.dataset.hidden === "true") {
+          passCode.textContent = passCode.dataset.realPassword;
+          passCode.dataset.hidden = "false";
+          btnTogglePass.textContent = "🔒";
+        } else {
+          passCode.textContent = "••••••••";
+          passCode.dataset.hidden = "true";
+          btnTogglePass.textContent = "👁️";
+        }
+      });
+      passContainer.appendChild(btnTogglePass);
+
+      passLabelSpan.appendChild(passContainer);
 
       const btnCopy = document.createElement("button");
       btnCopy.type = "button";
